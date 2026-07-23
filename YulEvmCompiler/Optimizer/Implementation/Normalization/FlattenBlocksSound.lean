@@ -860,4 +860,255 @@ theorem core_fwd {ss : List (Stmt Op)} (ih : FlattenIH calls creates ss)
   termination_by sizeOf ss
   decreasing_by all_goals (simp only [List.cons.sizeOf_spec]; omega)
 
+/-! ## The core backward simulation (mirror of `core_fwd`) -/
+
+theorem core_bwd {ss : List (Stmt Op)} (ih : FlattenIH calls creates ss)
+    (hFH : FunctionsHoisted ss) {vs fs : List Ident} (hsc : ScopedStmts vs fs ss)
+    (hfresh : ∀ x ∈ vs, x ∉ declaredNamesStmts ss) (huniq : (declaredNamesStmts ss).Nodup)
+    (hFIE : ForInitEmptyStmts ss) {funs : FunEnv D} {V st Vb' st' o}
+    (h : Step D funs V st (.stmts (flattenStmts ss)) (.sres Vb' st' o)) :
+    ∃ Vb, Step D funs V st (.stmts ss) (.sres Vb st' o) ∧ restore V Vb' = restore V Vb := by
+  match ss, ih, hFH, hsc, hfresh, huniq, hFIE, h with
+  | [], _, _, _, _, _, _, h =>
+      cases h with | seqNil => exact ⟨V, Step.seqNil, rfl⟩
+  | s :: rest, ih, hFH, hsc, hfresh, huniq, hFIE, h =>
+      have hscP : ScopedStmt vs fs s ∧ ScopedStmts (vs ++ declTopVars s) fs rest := hsc
+      have hnd := List.nodup_append.mp huniq
+      have huniqR : (declaredNamesStmts rest).Nodup := hnd.2.1
+      have hFHrest : FunctionsHoisted rest := fun x hx => hFH x (List.mem_cons_of_mem s hx)
+      have hFIErest : ForInitEmptyStmts rest := hFIE.2
+      have hfreshR : ∀ x ∈ vs ++ declTopVars s, x ∉ declaredNamesStmts rest := by
+        intro x hx hxr
+        rcases List.mem_append.1 hx with hv | hd
+        · exact hfresh x hv (by simp only [declaredNamesStmts, List.mem_append]; exact Or.inr hxr)
+        · exact hnd.2.2 x (declTopVars_subset hd) x hxr rfl
+      have ihRest : FlattenIH calls creates rest := fun b' hb' => ih b' (by
+        simp only [List.cons.sizeOf_spec]; omega)
+      have finish : ∀ (s' : Stmt Op), flattenStmt s = [s'] → EquivStmt D s s' →
+          ∃ Vb, Step D funs V st (.stmts (s :: rest)) (.sres Vb st' o) ∧
+            restore V Vb' = restore V Vb := by
+        intro s' hfe hEq
+        rw [show flattenStmts (s :: rest) = s' :: flattenStmts rest from by simp [flattenStmts, hfe]] at h
+        cases h with
+        | seqCons hs htail =>
+            rename_i V1 st1
+            obtain ⟨Vbr, hrest, hres⟩ :=
+              core_bwd ihRest hFHrest hscP.2 hfreshR huniqR hFIErest htail
+            refine ⟨Vbr, Step.seqCons ((EquivStmt.symm hEq).mp hs) hrest, ?_⟩
+            have h1 : V.length ≤ V1.length := venvLen_mono hs rfl
+            have h2 : V1.length ≤ Vb'.length := stmts_len htail
+            have h3 : V1.length ≤ Vbr.length := stmts_len hrest
+            rw [← restore_restore h1 h2, ← restore_restore h1 h3, hres]
+        | seqStop hs hne =>
+            exact ⟨Vb', Step.seqStop ((EquivStmt.symm hEq).mp hs) hne, rfl⟩
+      have hHT : HoistedTop s := hFH s (by simp)
+      cases s with
+      | block inner =>
+          have hnfInner : NoFunDefStmts inner := by
+            have := hHT; simpa [HoistedTop, NoFunDefStmt] using this
+          have hnfInnerF : NoFunDefStmts (flattenStmts inner) := noFunDef_flattenStmts hnfInner
+          have hscInner : ScopedStmts vs fs inner := by
+            have h2 : ScopedStmts vs (fs ++ funDefNames inner) inner := hscP.1
+            rwa [funDefNames_nil_of_noFunDef hnfInner, List.append_nil] at h2
+          have hEqInner : EquivBlock D inner (flattenStmts inner) :=
+            ih inner (by simp only [List.cons.sizeOf_spec, Stmt.block.sizeOf_spec]; omega)
+              hnfInner hscInner
+              (fun x hv hx => hfresh x hv (by
+                simp only [declaredNamesStmts, declaredNamesStmt, List.mem_append]; exact Or.inl hx))
+              hnd.1 hFIE.1
+          rw [show flattenStmts (.block inner :: rest) = flattenStmts inner ++ flattenStmts rest
+                from by simp [flattenStmts, flattenStmt]] at h
+          rcases stmts_append_fwd h with ⟨Vi', st1, hInnerF, hrestF'⟩ | ⟨hne, hInnerF⟩
+          · have hblk' : Step D funs V st (.stmt (.block (flattenStmts inner)))
+                (.sres (restore V Vi') st1 .normal) :=
+              (block_unwrap hnfInnerF).2 ⟨Vi', rfl, hInnerF⟩
+            obtain ⟨Vi, hViEq, hInner⟩ := (block_unwrap hnfInner).1 ((EquivBlock.symm hEqInner).mp hblk')
+            have hlenVi : V.length ≤ Vi.length := venvLen_mono hInner rfl
+            have hlenV1 : (restore V Vi).length = V.length := restore_length hlenVi
+            have hViV1 : restore V Vi' = restore V Vi := hViEq
+            set A : VEnv D := Vi'.take (Vi'.length - V.length) with hA
+            have hsplit : A ++ restore V Vi = Vi' := by
+              have hd : Vi'.drop (Vi'.length - V.length) = restore V Vi := hViV1
+              calc A ++ restore V Vi
+                  = Vi'.take (Vi'.length - V.length) ++ Vi'.drop (Vi'.length - V.length) := by rw [hd]
+                _ = Vi' := List.take_append_drop _ _
+            have hViKeys : Vi'.map Prod.fst = A.map Prod.fst ++ V.map Prod.fst := by
+              have h0 : Vi'.map Prod.fst = (A ++ restore V Vi).map Prod.fst := by rw [hsplit]
+              rw [h0, List.map_append]; congr 1
+              exact restore_keys (venvKeys_suffix hInner rfl) hlenVi
+            have hAdecl : ∀ p ∈ A, p.1 ∈ declaredNamesStmts inner := by
+              intro p hp
+              have := stmts_added hInnerF (A := A.map Prod.fst) hViKeys p.1 (List.mem_map.2 ⟨p, hp, rfl⟩)
+              rwa [declaredNames_flattenStmts] at this
+            have hframe : ∀ p ∈ A, stmtsMentions p.1 (flattenStmts rest) = false := by
+              intro p hp
+              rw [mentions_flattenStmts]
+              by_contra hmen
+              rw [Bool.not_eq_false] at hmen
+              rcases scopedStmts_mentions hscP.2 hmen with hv | hd
+              · exact hfresh p.1 (by simpa [declTopVars] using hv) (by
+                  simp only [declaredNamesStmts, declaredNamesStmt, List.mem_append]
+                  exact Or.inl (hAdecl p hp))
+              · exact hnd.2.2 p.1 (hAdecl p hp) p.1 hd rfl
+            rw [← hsplit] at hrestF'
+            obtain ⟨Vbr', hrestV1, hresR⟩ := framePrefixRemove_stmts A hrestF' hframe
+            obtain ⟨Vb, hrest, hres⟩ :=
+              core_bwd ihRest hFHrest hscP.2 hfreshR huniqR hFIErest hrestV1
+            refine ⟨Vb, Step.seqCons ((block_unwrap hnfInner).2 ⟨Vi, rfl, hInner⟩) hrest, ?_⟩
+            calc restore V Vb' = restore (restore V Vi) Vb' := restore_len_eq hlenV1.symm
+              _ = restore (restore V Vi) Vbr' := hresR
+              _ = restore (restore V Vi) Vb := hres
+              _ = restore V Vb := restore_len_eq hlenV1
+          · have hblk' : Step D funs V st (.stmt (.block (flattenStmts inner)))
+                (.sres (restore V Vb') st' o) :=
+              (block_unwrap hnfInnerF).2 ⟨Vb', rfl, hInnerF⟩
+            obtain ⟨Vi, hViEq, hInner⟩ := (block_unwrap hnfInner).1 ((EquivBlock.symm hEqInner).mp hblk')
+            have hlenVi : V.length ≤ Vi.length := venvLen_mono hInner rfl
+            refine ⟨restore V Vi, Step.seqStop ((block_unwrap hnfInner).2 ⟨Vi, rfl, hInner⟩) hne, ?_⟩
+            calc restore V Vb' = restore V Vi := hViEq
+              _ = restore V (restore V Vi) := (restore_restore (le_refl _) hlenVi).symm
+      | funDef n ps rs b =>
+          refine finish (.funDef n ps rs (flattenStmts b)) rfl ?_
+          intro funs' V'' st'' V3 st3 o3
+          constructor <;> (intro hstep; cases hstep; exact Step.funDef)
+      | letDecl vars val => exact finish _ rfl (EquivStmt.refl _)
+      | assign vars val => exact finish _ rfl (EquivStmt.refl _)
+      | exprStmt e => exact finish _ rfl (EquivStmt.refl _)
+      | «break» => exact finish _ rfl (EquivStmt.refl _)
+      | «continue» => exact finish _ rfl (EquivStmt.refl _)
+      | «leave» => exact finish _ rfl (EquivStmt.refl _)
+      | cond c body =>
+          have hnfBody : NoFunDefStmts body := by simpa [HoistedTop, NoFunDefStmt] using hHT
+          refine finish (.cond c (flattenStmts body)) rfl
+            (EquivStmt.cond_congr (@EquivExpr.refl (evmWithExternal calls creates) _ c) ?_)
+          exact ih body (by simp only [List.cons.sizeOf_spec, Stmt.cond.sizeOf_spec]; omega)
+            hnfBody (by
+              have h2 : ScopedExpr vs fs c ∧ ScopedStmts vs (fs ++ funDefNames body) body := hscP.1
+              rw [funDefNames_nil_of_noFunDef hnfBody, List.append_nil] at h2
+              exact h2.2)
+            (fun x hv hx => hfresh x hv (by
+              simp only [declaredNamesStmts, declaredNamesStmt, List.mem_append]; exact Or.inl hx))
+            (by have := huniq; simp only [declaredNamesStmts, declaredNamesStmt] at this
+                exact (List.nodup_append.mp this).1)
+            hFIE.1
+      | «switch» c cs d =>
+          obtain ⟨hnfC, hnfD⟩ : NoFunDefCases cs ∧ NoFunDefDflt d := by
+            have := hHT; simpa [HoistedTop, NoFunDefStmt] using this
+          have hscSw : ScopedExpr vs fs c ∧ ScopedCases vs fs cs ∧ ScopedDflt vs fs d := hscP.1
+          obtain ⟨hFIEc, hFIEd⟩ : ForInitEmptyCases cs ∧ ForInitEmptyDflt d := hFIE.1
+          have hundSw : (declaredNamesCases cs ++ declaredNamesDflt d).Nodup := by
+            have := hnd.1; simpa [declaredNamesStmt] using this
+          have hmemSw : ∀ x, x ∈ declaredNamesCases cs ++ declaredNamesDflt d →
+              x ∈ declaredNamesStmts (.switch c cs d :: rest) := fun x hx => by
+            simp only [declaredNamesStmts, declaredNamesStmt]; exact List.mem_append_left _ hx
+          have hEB : ∀ l b, (l, b) ∈ cs → EquivBlock D b (flattenStmts b) := by
+            intro l b hm
+            have hnfb := noFunDefCases_mem hnfC hm
+            have hsub := declaredCases_sublist hm
+            have hscb : ScopedStmts vs fs b := by
+              have h2 := scopedCases_mem hscSw.2.1 hm
+              rwa [funDefNames_nil_of_noFunDef hnfb, List.append_nil] at h2
+            exact ih b
+              (by have := sizeOf_cases_mem hm
+                  simp only [List.cons.sizeOf_spec, Stmt.switch.sizeOf_spec]; omega)
+              hnfb hscb
+              (fun x hv hx => hfresh x hv (hmemSw x (List.mem_append_left _ (hsub.subset hx))))
+              (List.Nodup.sublist hsub (List.nodup_append.mp hundSw).1)
+              (forInitCases_mem hFIEc hm)
+          refine finish (.switch c (flattenCases cs) (flattenDflt d)) rfl
+            (EquivStmt.switch_congr (@EquivExpr.refl (evmWithExternal calls creates) _ c)
+              (flatten_cases_forall2 hEB) ?_)
+          cases d with
+          | none => exact EquivBlock.refl _
+          | some bd =>
+              have hnfBd : NoFunDefStmts bd := by simpa [NoFunDefDflt] using hnfD
+              have hsubD : List.Sublist (declaredNamesStmts bd) (declaredNamesDflt (some bd)) := by
+                simp only [declaredNamesDflt]; exact List.Sublist.refl _
+              have hscBd : ScopedStmts vs fs bd := by
+                have h2 : ScopedStmts vs (fs ++ funDefNames bd) bd := by
+                  simpa [ScopedDflt] using hscSw.2.2
+                rwa [funDefNames_nil_of_noFunDef hnfBd, List.append_nil] at h2
+              simp only [Option.getD, flattenDflt]
+              exact ih bd
+                (by have : sizeOf bd < sizeOf (Option.some bd) := by
+                      simp only [Option.some.sizeOf_spec]; omega
+                    simp only [List.cons.sizeOf_spec, Stmt.switch.sizeOf_spec]; omega)
+                hnfBd hscBd
+                (fun x hv hx => hfresh x hv (hmemSw x (List.mem_append_right _ (hsubD.subset hx))))
+                (List.Nodup.sublist hsubD (List.nodup_append.mp hundSw).2.1)
+                (by simpa [ForInitEmptyDflt] using hFIEd)
+      | forLoop init c post body =>
+          obtain ⟨hinit0, hpostFIE, hbodyFIE⟩ := hFIE.1
+          subst hinit0
+          have hnfAll : NoFunDefStmts ([] : List (Stmt Op)) ∧ NoFunDefStmts post ∧
+              NoFunDefStmts body := by have := hHT; simpa [HoistedTop, NoFunDefStmt] using this
+          obtain ⟨_, hnfPost, hnfBody⟩ := hnfAll
+          have hf0 : funDefNames ([] : List (Stmt Op)) = [] := funDefNames_nil_of_noFunDef trivial
+          have hscPB : ScopedStmts vs fs post ∧ ScopedStmts vs fs body := by
+            have h2 := hscP.1
+            simp only [ScopedStmt, hf0, funDefNames_nil_of_noFunDef hnfPost,
+              funDefNames_nil_of_noFunDef hnfBody, declTopVarsL, List.flatMap_nil,
+              List.append_nil] at h2
+            exact ⟨h2.2.2.1, h2.2.2.2⟩
+          have hunPB : (declaredNamesStmts post ++ declaredNamesStmts body).Nodup := by
+            have := hnd.1
+            simpa [declaredNamesStmt, declaredNamesStmts] using this
+          have hmemPB : ∀ {x}, (x ∈ declaredNamesStmts post ∨ x ∈ declaredNamesStmts body) →
+              x ∈ declaredNamesStmts (.forLoop [] c post body :: rest) := by
+            intro x hx
+            simp only [declaredNamesStmts, declaredNamesStmt, List.mem_append, List.nil_append]
+            exact Or.inl hx
+          refine finish (.forLoop [] c (flattenStmts post) (flattenStmts body))
+            (by simp [flattenStmt, flattenStmts])
+            (EquivStmt.forLoop_congr [] (@EquivExpr.refl (evmWithExternal calls creates) _ c) ?_ ?_)
+          · exact ih post (by simp only [List.cons.sizeOf_spec, Stmt.forLoop.sizeOf_spec]; omega)
+              hnfPost hscPB.1 (fun x hv hx => hfresh x hv (hmemPB (Or.inl hx)))
+              (List.nodup_append.mp hunPB).1 hpostFIE
+          · exact ih body (by simp only [List.cons.sizeOf_spec, Stmt.forLoop.sizeOf_spec]; omega)
+              hnfBody hscPB.2 (fun x hv hx => hfresh x hv (hmemPB (Or.inr hx)))
+              (List.nodup_append.mp hunPB).2.1 hbodyFIE
+  termination_by sizeOf ss
+  decreasing_by all_goals (simp only [List.cons.sizeOf_spec]; omega)
+
+/-! ## Assembly: funDef-free blocks, then the root -/
+
+theorem noFunDefStmts_mem {ss : List (Stmt Op)} (h : NoFunDefStmts ss) {s} (hm : s ∈ ss) :
+    NoFunDefStmt s := by
+  induction ss with
+  | nil => simp at hm
+  | cons a tl ih =>
+      rcases List.mem_cons.1 hm with he | ht
+      · subst he; exact h.1
+      · exact ih h.2 ht
+
+theorem hoistedTop_of_noFunDef {s : Stmt Op} (h : NoFunDefStmt s) : HoistedTop s := by
+  cases s <;> simp_all [HoistedTop, NoFunDefStmt]
+
+theorem funDefFree_hoisted {ss : List (Stmt Op)} (h : NoFunDefStmts ss) :
+    FunctionsHoisted ss := fun _ hs => hoistedTop_of_noFunDef (noFunDefStmts_mem h hs)
+
+/-- **Soundness for funDef-free blocks**, by strong induction on size: the block
+is `EquivBlock`-equivalent to its flattening. Provides the recursion `ih` to
+`core_fwd`/`core_bwd`, and each direction wraps them with `block_unwrap`. -/
+theorem flatten_equivBlock (b : List (Stmt Op)) (hnf : NoFunDefStmts b)
+    {vs fs : List Ident} (hsc : ScopedStmts vs fs b)
+    (hfresh : ∀ x ∈ vs, x ∉ declaredNamesStmts b) (huniq : (declaredNamesStmts b).Nodup)
+    (hFIE : ForInitEmptyStmts b) : EquivBlock D b (flattenStmts b) := by
+  have ih : FlattenIH calls creates b := by
+    intro b' hb' hnf' vs' fs' hsc' hfr' hun' hfie'
+    exact flatten_equivBlock b' hnf' hsc' hfr' hun' hfie'
+  have hFH : FunctionsHoisted b := funDefFree_hoisted hnf
+  intro funs V st V' st' o
+  constructor
+  · intro hh
+    obtain ⟨Vb, rfl, hstep⟩ := (block_unwrap hnf).mp hh
+    obtain ⟨Vb', hstep', hres⟩ := core_fwd ih hFH hsc hfresh huniq hFIE hstep
+    exact (block_unwrap (noFunDef_flattenStmts hnf)).mpr ⟨Vb', hres, hstep'⟩
+  · intro hh
+    obtain ⟨Vb', rfl, hstep'⟩ := (block_unwrap (noFunDef_flattenStmts hnf)).mp hh
+    obtain ⟨Vb, hstep, hres⟩ := core_bwd ih hFH hsc hfresh huniq hFIE hstep'
+    exact (block_unwrap hnf).mpr ⟨Vb, hres, hstep⟩
+termination_by sizeOf b
+decreasing_by exact hb'
+
 end YulEvmCompiler.Optimizer
