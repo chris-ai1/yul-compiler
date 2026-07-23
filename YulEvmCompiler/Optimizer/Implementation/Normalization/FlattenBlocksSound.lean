@@ -48,6 +48,7 @@ namespace YulEvmCompiler.Optimizer
 open YulSemantics
 open YulSemantics.EVM
 open YulEvmCompiler.Optimizer.NormalForm
+open YulEvmCompiler.Optimizer.Flatten
 
 variable {calls : ExternalCalls} {creates : ExternalCreates}
 local notation "D" => evmWithExternal calls creates
@@ -67,5 +68,68 @@ theorem hoist_eq_nil_of_noFunDef {ss : List (Stmt Op)}
       have hrest := ih h.2
       have h1 := h.1
       cases s <;> simp_all [hoist, NoFunDefStmt]
+
+/-! ## Bridge: flattening preserves funDef-freeness
+
+So a funDef-free block stays funDef-free after flattening; combined with the
+previous lemma, both a spliced block and its flattening have empty `hoist`. -/
+
+theorem noFunDefStmts_append {a b : List (Stmt Op)}
+    (ha : NoFunDefStmts a) (hb : NoFunDefStmts b) : NoFunDefStmts (a ++ b) := by
+  induction a with
+  | nil => simpa using hb
+  | cons s rest ih => exact ⟨ha.1, ih ha.2⟩
+
+mutual
+theorem noFunDef_flattenStmt {s : Stmt Op} (h : NoFunDefStmt s) :
+    NoFunDefStmts (flattenStmt s) := by
+  cases s with
+  | funDef n ps rs body => exact absurd h (by simp [NoFunDefStmt])
+  | block body =>
+      simpa [flattenStmt] using noFunDef_flattenStmts (by simpa [NoFunDefStmt] using h)
+  | cond c body =>
+      simp only [flattenStmt, NoFunDefStmts, NoFunDefStmt, and_true]
+      exact noFunDef_flattenStmts (by simpa [NoFunDefStmt] using h)
+  | switch c cs d =>
+      simp only [flattenStmt, NoFunDefStmts, NoFunDefStmt, and_true]
+      exact ⟨noFunDef_flattenCases (by simpa [NoFunDefStmt] using h.1),
+             noFunDef_flattenDflt (by simpa [NoFunDefStmt] using h.2)⟩
+  | forLoop i c p b =>
+      simp only [flattenStmt, NoFunDefStmts, NoFunDefStmt, and_true]
+      obtain ⟨hi, hp, hb⟩ := (by simpa [NoFunDefStmt] using h :
+        NoFunDefStmts i ∧ NoFunDefStmts p ∧ NoFunDefStmts b)
+      exact ⟨noFunDef_flattenStmts hi, noFunDef_flattenStmts hp, noFunDef_flattenStmts hb⟩
+  | letDecl vars v => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
+  | assign vars v => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
+  | exprStmt e => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
+  | «break» => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
+  | «continue» => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
+  | leave => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
+theorem noFunDef_flattenStmts {ss : List (Stmt Op)} (h : NoFunDefStmts ss) :
+    NoFunDefStmts (flattenStmts ss) := by
+  cases ss with
+  | nil => trivial
+  | cons s rest =>
+      simp only [flattenStmts]
+      exact noFunDefStmts_append (noFunDef_flattenStmt h.1) (noFunDef_flattenStmts h.2)
+theorem noFunDef_flattenCases {cs : List (Literal × List (Stmt Op))}
+    (h : NoFunDefCases cs) : NoFunDefCases (flattenCases cs) := by
+  cases cs with
+  | nil => trivial
+  | cons hd tl =>
+      obtain ⟨l, b⟩ := hd
+      exact ⟨noFunDef_flattenStmts h.1, noFunDef_flattenCases h.2⟩
+theorem noFunDef_flattenDflt {d : Option (List (Stmt Op))}
+    (h : NoFunDefDflt d) : NoFunDefDflt (flattenDflt d) := by
+  cases d with
+  | none => trivial
+  | some b => simpa [flattenDflt, NoFunDefDflt] using noFunDef_flattenStmts h
+
+end
+
+/-- Both a funDef-free block and its flattening have an empty hoisted scope. -/
+theorem hoist_flatten_eq_nil {ss : List (Stmt Op)} (h : NoFunDefStmts ss) :
+    hoist D (flattenStmts ss) = [] :=
+  hoist_eq_nil_of_noFunDef (noFunDef_flattenStmts h)
 
 end YulEvmCompiler.Optimizer
