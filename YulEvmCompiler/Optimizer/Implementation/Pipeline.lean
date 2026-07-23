@@ -8,6 +8,7 @@ import YulEvmCompiler.Optimizer.Implementation.FreshenCallsResolve
 import YulEvmCompiler.Optimizer.Implementation.HoistCallsResolve
 import YulEvmCompiler.Optimizer.Implementation.StorageForwardResolve
 import YulEvmCompiler.Optimizer.Implementation.ObjectPass
+import YulEvmCompiler.Optimizer.Implementation.Normalization.HoistForInitResolve
 set_option warningAsError true
 /-!
 # Production optimizer pipeline
@@ -95,9 +96,10 @@ are ~5 calls deep (`external_fun_*` → `abi_decode_tuple_*` → `abi_decode_t_*
 call-free leaves. -/
 def pipelineRounds : Nat := 6
 
-/-- One block-path round. -/
+/-- One block-path round. `hoistForInit` runs first so the pulled-out
+initializers become ordinary block statements the later stages optimize. -/
 def blockRound : List (LocalPass D) :=
-  [simplify, propagate, inlineHelpersPass true, hoistCalls, freshenCalls, inlineCalls,
+  [hoistForInit, simplify, propagate, inlineHelpersPass true, hoistCalls, freshenCalls, inlineCalls,
    storageForward, simplify, deadPure, deadResults]
 
 /-- Verified block pipeline at an explicit round count. Iterated inlining can
@@ -118,7 +120,8 @@ def optimizerPipelineLight : LocalPass D :=
 
 /-- One object-path round, with each stage's resolution congruence. -/
 def objectRound : List (RPass calls creates) :=
-  [⟨simplify, fun L b => resolveSimplifyBlock_equiv L b⟩,
+  [⟨hoistForInit, fun L b => resolveHoistForInitBlock_equiv L b⟩,
+   ⟨simplify, fun L b => resolveSimplifyBlock_equiv L b⟩,
    ⟨inlineHelpersPass false, fun L b => by
       have hi := (inlineHelpersPass (calls := calls) (creates := creates) false).sound
         (resolveForLayoutStmts L b)
