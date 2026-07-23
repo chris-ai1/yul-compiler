@@ -90,4 +90,74 @@ def normalizationPasses : Optimizer.GlobalPass (evmWithExternal calls creates) :
   Optimizer.GlobalPass.ofList
     [disambiguatePass, Optimizer.Normalization.hoistFunDefsPass, flattenBlocksPass]
 
+/-! ### Block-level normalization (for the bare-block compile path)
+
+The same three passes as per-block transforms, for a top-level bare block (a
+whole program in itself, so `Run`-equivalence is the right notion there too). -/
+
+/-- Disambiguation as a guarded block transform. -/
+def disambiguateBlock {D : Dialect} [DecidableEq D.Value] : Block D.Op → Block D.Op :=
+  Optimizer.guardedBlock disambiguateGuard disambiguate
+
+theorem disambiguateBlock_runEquiv {D : Dialect} [DecidableEq D.Value] (b : Block D.Op) :
+    Optimizer.RunEquivBlock D b (disambiguateBlock b) := by
+  unfold disambiguateBlock Optimizer.guardedBlock
+  by_cases hg : disambiguateGuard b = true
+  · rw [if_pos hg]
+    obtain ⟨hsv, hwf, hns, hws, hfs⟩ := disambiguateGuard_sound hg
+    exact disambiguate_runEquivBlock b hsv hwf hns hws hfs
+  · rw [if_neg hg]
+    exact Optimizer.RunEquivBlock.refl b
+
+open YulSemantics.EVM in
+/-- The function hoister's guarded block transform preserves whole-program
+behaviour (the per-block content of `hoistFunDefsPass`). -/
+theorem hoistBlock_runEquiv {D : Dialect} [DecidableEq D.Value] (b : Block D.Op) :
+    Optimizer.RunEquivBlock D b (Optimizer.Normalization.hoistBlock b) := by
+  unfold Optimizer.Normalization.hoistBlock Optimizer.guardedBlock
+  by_cases hg : Optimizer.Normalization.hoistGuard b = true
+  · rw [if_pos hg]
+    exact fun st0 V' st' o => Optimizer.Normalization.liftFunDefs_run_equiv
+      (Optimizer.Normalization.hoistGuard_sound hg).1
+      (Optimizer.Normalization.hoistGuard_sound hg).2
+  · rw [if_neg hg]
+    exact Optimizer.RunEquivBlock.refl b
+
+open YulSemantics.EVM in
+/-- Block flattening as a guarded block transform. -/
+def flattenBlockChecked : Block (evmWithExternal calls creates).Op →
+    Block (evmWithExternal calls creates).Op :=
+  Optimizer.guardedBlock flattenGuard Flatten.flattenBlock
+
+open YulSemantics.EVM in
+theorem flattenBlockChecked_runEquiv (b : Block (evmWithExternal calls creates).Op) :
+    Optimizer.RunEquivBlock (evmWithExternal calls creates) b
+      (flattenBlockChecked (calls := calls) (creates := creates) b) := by
+  unfold flattenBlockChecked Optimizer.guardedBlock
+  by_cases hg : flattenGuard b = true
+  · rw [if_pos hg]
+    obtain ⟨hFH, hsc, huniq, hFIE⟩ := flattenGuard_sound hg
+    exact Optimizer.RunEquivBlock.of_equivBlock
+      (Optimizer.flattenBlock_sound b hFH hsc huniq hFIE)
+  · rw [if_neg hg]
+    exact Optimizer.RunEquivBlock.refl b
+
+open YulSemantics.EVM in
+/-- **Whole-program block normalization**: disambiguate, hoist function
+definitions, flatten blocks — the per-block form of `normalizationPasses`,
+for the bare-block compile path. -/
+def normalizeBlock (b : Block (evmWithExternal calls creates).Op) :
+    Block (evmWithExternal calls creates).Op :=
+  flattenBlockChecked (calls := calls) (creates := creates)
+    (Optimizer.Normalization.hoistBlock (disambiguateBlock b))
+
+open YulSemantics.EVM in
+/-- The block normalizer preserves whole-program behaviour. -/
+theorem normalizeBlock_runEquiv (b : Block (evmWithExternal calls creates).Op) :
+    Optimizer.RunEquivBlock (evmWithExternal calls creates) b
+      (normalizeBlock (calls := calls) (creates := creates) b) :=
+  ((disambiguateBlock_runEquiv b).trans
+    (hoistBlock_runEquiv (disambiguateBlock b))).trans
+    (flattenBlockChecked_runEquiv (Optimizer.Normalization.hoistBlock (disambiguateBlock b)))
+
 end YulEvmCompiler.Optimizer.Normalize

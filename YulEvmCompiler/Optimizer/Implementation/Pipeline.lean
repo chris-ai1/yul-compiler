@@ -331,6 +331,17 @@ iterated object pipeline on every code block of the tree. -/
 def optimizerPipelineObjectNormalized : Object Op → Object Op :=
   (normalizedObjectPipeline (calls := calls) (creates := creates)).run
 
+/-- The light variant: normalization prefix, then the one-round pipeline (the
+middle compile fallback under stack pressure). -/
+def normalizedObjectPipelineLight : GlobalPass D :=
+  GlobalPass.comp
+    ((objectPipelineRounds (calls := calls) (creates := creates) 1).toGlobal)
+    (Normalize.normalizationPasses)
+
+/-- Light production entry point (one optimizer round after normalization). -/
+def optimizerPipelineObjectNormalizedLight : Object Op → Object Op :=
+  (normalizedObjectPipelineLight (calls := calls) (creates := creates)).run
+
 @[simp] theorem optimizerPipelineObjectNormalized_def (o : Object Op) :
     optimizerPipelineObjectNormalized (calls := calls) (creates := creates) o
       = mapObjCode (objectPipeline (calls := calls) (creates := creates)).run

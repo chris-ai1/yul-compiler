@@ -135,12 +135,15 @@ def compileSource (source : String) : Option ByteArray := do
       -- then retry the shallower one-round pipeline, with and without smart
       -- layout, before retaining the historical unoptimized fallback. Every
       -- choice is covered by its own correctness theorem.
+      let normalized := YulEvmCompiler.Optimizer.Normalize.normalizeBlock
+        (calls := YulSemantics.EVM.ExternalCalls.none)
+        (creates := YulSemantics.EVM.ExternalCreates.none) b
       let optimized := (YulEvmCompiler.Optimizer.optimizerPipeline
         (calls := YulSemantics.EVM.ExternalCalls.none)
-        (creates := YulSemantics.EVM.ExternalCreates.none)).run b
+        (creates := YulSemantics.EVM.ExternalCreates.none)).run normalized
       let light := (YulEvmCompiler.Optimizer.optimizerPipelineLight
         (calls := YulSemantics.EVM.ExternalCalls.none)
-        (creates := YulSemantics.EVM.ExternalCreates.none)).run b
+        (creates := YulSemantics.EVM.ExternalCreates.none)).run normalized
       let asm := YulEvmCompiler.compile optimized
         <|> YulEvmCompiler.compile
           (YulEvmCompiler.Optimizer.stackLayoutBlock optimized)
@@ -155,12 +158,12 @@ def compileSource (source : String) : Option ByteArray := do
   | some (.object o) =>
       let raw := pruneLinkerObjectTree o
       let o := desugarObject raw
-      let optimized := YulEvmCompiler.Optimizer.optimizerPipelineObject
+      let optimized := YulEvmCompiler.Optimizer.optimizerPipelineObjectNormalized
         (calls := YulSemantics.EVM.ExternalCalls.none)
         (creates := YulSemantics.EVM.ExternalCreates.none) o
       let optimizedLayout :=
         YulEvmCompiler.Optimizer.stackLayoutObject optimized
-      let light := YulEvmCompiler.Optimizer.optimizerPipelineObjectLight
+      let light := YulEvmCompiler.Optimizer.optimizerPipelineObjectNormalizedLight
         (calls := YulSemantics.EVM.ExternalCalls.none)
         (creates := YulSemantics.EVM.ExternalCreates.none) o
       let layout ← YulEvmCompiler.compileObject optimized
