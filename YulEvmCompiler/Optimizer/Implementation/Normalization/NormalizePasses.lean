@@ -45,12 +45,24 @@ theorem disambiguateGuard_sound {b : Block Op} (h : disambiguateGuard b = true) 
   exact ⟨chkSVStmts_sound h.1.1.1.1.1, ⟨h.1.1.1.1.2, chkWFStmts_sound h.1.1.1.2⟩,
     chkScopedStmts_sound h.1.1.2, chkWScopedStmts_sound h.1.2, chkFScopedStmts_sound h.2⟩
 
+/-- Disambiguation is *needed* only when some name is declared twice — `solc`'s
+IR is already disambiguated, and renaming an already-unique program to opaque
+fresh names only hurts downstream heuristics. -/
+def disambiguateNeeded (b : Block Op) : Bool :=
+  !(decide (NormalForm.declaredNamesStmts b).Nodup)
+
+/-- The pass fires only on valid programs that actually need it. -/
+def disambiguateFullGuard (b : Block Op) : Bool :=
+  disambiguateNeeded b && disambiguateGuard b
+
 /-- **Disambiguation as a verified global pass**: rename every declared name to
-a globally fresh one wherever the source-validity check passes; sound
-unconditionally by `disambiguate_runEquivBlock` behind the guard. -/
+a globally fresh one wherever names are not yet unique and the source-validity
+check passes; sound unconditionally by `disambiguate_runEquivBlock` behind the
+guard. -/
 def disambiguatePass {D : Dialect} [DecidableEq D.Value] : Optimizer.GlobalPass D :=
-  Optimizer.GlobalPass.ofGuardedBlock disambiguateGuard disambiguate (fun b hg => by
-    obtain ⟨hsv, hwf, hns, hws, hfs⟩ := disambiguateGuard_sound hg
+  Optimizer.GlobalPass.ofGuardedBlock disambiguateFullGuard disambiguate (fun b hg => by
+    obtain ⟨hsv, hwf, hns, hws, hfs⟩ :=
+      disambiguateGuard_sound (Bool.and_eq_true .. ▸ hg).2
     exact disambiguate_runEquivBlock b hsv hwf hns hws hfs)
 
 /-! ### The block flattener -/
@@ -88,23 +100,24 @@ disambiguate, then hoist function definitions, then flatten blocks
 so the composition is unconditionally sound. -/
 def normalizationPasses : Optimizer.GlobalPass (evmWithExternal calls creates) :=
   Optimizer.GlobalPass.ofList
-    [disambiguatePass, Optimizer.Normalization.hoistFunDefsPass, flattenBlocksPass]
+    [disambiguatePass]  -- ISOLATION TEST
 
 /-! ### Block-level normalization (for the bare-block compile path)
 
 The same three passes as per-block transforms, for a top-level bare block (a
 whole program in itself, so `Run`-equivalence is the right notion there too). -/
 
-/-- Disambiguation as a guarded block transform. -/
+/-- Disambiguation as a guarded block transform (fires only when needed). -/
 def disambiguateBlock {D : Dialect} [DecidableEq D.Value] : Block D.Op → Block D.Op :=
-  Optimizer.guardedBlock disambiguateGuard disambiguate
+  Optimizer.guardedBlock disambiguateFullGuard disambiguate
 
 theorem disambiguateBlock_runEquiv {D : Dialect} [DecidableEq D.Value] (b : Block D.Op) :
     Optimizer.RunEquivBlock D b (disambiguateBlock b) := by
   unfold disambiguateBlock Optimizer.guardedBlock
-  by_cases hg : disambiguateGuard b = true
+  by_cases hg : disambiguateFullGuard b = true
   · rw [if_pos hg]
-    obtain ⟨hsv, hwf, hns, hws, hfs⟩ := disambiguateGuard_sound hg
+    obtain ⟨hsv, hwf, hns, hws, hfs⟩ :=
+      disambiguateGuard_sound (Bool.and_eq_true .. ▸ hg).2
     exact disambiguate_runEquivBlock b hsv hwf hns hws hfs
   · rw [if_neg hg]
     exact Optimizer.RunEquivBlock.refl b
@@ -148,16 +161,13 @@ definitions, flatten blocks — the per-block form of `normalizationPasses`,
 for the bare-block compile path. -/
 def normalizeBlock (b : Block (evmWithExternal calls creates).Op) :
     Block (evmWithExternal calls creates).Op :=
-  flattenBlockChecked (calls := calls) (creates := creates)
-    (Optimizer.Normalization.hoistBlock (disambiguateBlock b))
+  disambiguateBlock b  -- ISOLATION TEST
 
 open YulSemantics.EVM in
 /-- The block normalizer preserves whole-program behaviour. -/
 theorem normalizeBlock_runEquiv (b : Block (evmWithExternal calls creates).Op) :
     Optimizer.RunEquivBlock (evmWithExternal calls creates) b
       (normalizeBlock (calls := calls) (creates := creates) b) :=
-  ((disambiguateBlock_runEquiv b).trans
-    (hoistBlock_runEquiv (disambiguateBlock b))).trans
-    (flattenBlockChecked_runEquiv (Optimizer.Normalization.hoistBlock (disambiguateBlock b)))
+  disambiguateBlock_runEquiv b  -- ISOLATION TEST
 
 end YulEvmCompiler.Optimizer.Normalize
