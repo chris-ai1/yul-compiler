@@ -33,3 +33,4 @@ import YulEvmCompiler.Optimizer.Implementation.StackLayoutSound
 import YulEvmCompiler.Optimizer.Implementation.StackLayoutObject
 import YulEvmCompiler.Optimizer.Implementation.Normalization.NormalForm
 import YulEvmCompiler.Optimizer.Implementation.Normalization.FlattenBlocks
+import YulEvmCompiler.Optimizer.Implementation.Normalization.FlattenBlocksSound
