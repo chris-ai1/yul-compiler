@@ -434,4 +434,89 @@ theorem stmts_len {funs : FunEnv D} {ss : List (Stmt Op)} {V st Vb st' o}
     (h : Step D funs V st (.stmts ss) (.sres Vb st' o)) : V.length ≤ Vb.length :=
   venvLen_mono h rfl
 
+/-! ## Added bindings are declared
+
+The bindings a statement (sequence) prepends to the environment are named by its
+declared names. This is what identifies the leaked locals of a spliced block as
+that block's declared variables, so uniqueness can prove them unmentioned. -/
+
+private theorem append_nil_of_eq {α} {A L : List α} (h : L = A ++ L) : A = [] := by
+  have hlen := congrArg List.length h
+  simp only [List.length_append] at hlen
+  exact List.eq_nil_of_length_eq_zero (by omega)
+
+theorem stmt_added {funs : FunEnv D} {s : Stmt Op} {V st V1 st1 o}
+    (h : Step D funs V st (.stmt s) (.sres V1 st1 o)) {A : List Ident}
+    (hA : V1.map Prod.fst = A ++ V.map Prod.fst) : ∀ x ∈ A, x ∈ declaredNamesStmt s := by
+  intro x hx
+  have nilCase : V1.map Prod.fst = V.map Prod.fst → x ∈ declaredNamesStmt s := by
+    intro hk; rw [hk] at hA; obtain rfl := append_nil_of_eq hA; exact absurd hx (by simp)
+  have restoreCase : ∀ {Vb : VEnv D} {funs' body st'' o''},
+      Step D funs' V st (.stmts body) (.sres Vb st'' o'') → V1 = restore V Vb →
+      x ∈ declaredNamesStmt s := by
+    intro Vb funs' body st'' o'' hb heq
+    exact nilCase (by rw [heq, restore_keys (venvKeys_suffix hb rfl) (venvLen_mono hb rfl)])
+  have blockStmtCase : ∀ {V' funs' body' stIn st'' o''},
+      Step D funs' V stIn (.stmt (.block body')) (.sres V' st'' o'') → V1 = V' →
+      x ∈ declaredNamesStmt s := by
+    intro V' funs' body' stIn st'' o'' hb heq
+    cases hb with
+    | block hbody =>
+        exact nilCase (by rw [heq, restore_keys (venvKeys_suffix hbody rfl) (venvLen_mono hbody rfl)])
+  cases h with
+  | @letZero _ _ _ vars =>
+      rw [show (bindZeros D vars ++ V).map Prod.fst = vars ++ V.map Prod.fst from by
+            simp [bindZeros, List.map_append, List.map_map, Function.comp_def]] at hA
+      obtain rfl := List.append_cancel_right hA
+      simpa [declaredNamesStmt] using hx
+  | @letVal _ _ _ vars e vals _ _ =>
+      rw [show (List.zip vars vals ++ V).map Prod.fst = (List.zip vars vals).map Prod.fst
+            ++ V.map Prod.fst from by simp [List.map_append]] at hA
+      obtain rfl := List.append_cancel_right hA
+      obtain ⟨p, hp, rfl⟩ := List.mem_map.1 hx
+      simpa [declaredNamesStmt] using (List.of_mem_zip hp).1
+  | letHalt _ => exact nilCase rfl
+  | assignVal _ => exact nilCase (by rw [VEnv.setMany_keys])
+  | assignHalt _ => exact nilCase rfl
+  | exprStmt _ => exact nilCase rfl
+  | exprStmtHalt _ => exact nilCase rfl
+  | funDef => exact nilCase rfl
+  | block hb => exact restoreCase hb rfl
+  | ifTrue _ _ hb => exact blockStmtCase hb rfl
+  | ifFalse _ => exact nilCase rfl
+  | ifHalt _ => exact nilCase rfl
+  | switchExec _ hb => exact blockStmtCase hb rfl
+  | switchHalt _ => exact nilCase rfl
+  | forLoop hinit hloop => exact nilCase (by
+      rw [restore_keys ((venvKeys_suffix hinit rfl).trans (venvKeys_suffix hloop rfl))
+            (Nat.le_trans (venvLen_mono hinit rfl) (venvLen_mono hloop rfl))])
+  | forInitHalt hinit => exact nilCase (by
+      rw [restore_keys (venvKeys_suffix hinit rfl) (venvLen_mono hinit rfl)])
+  | «break» => exact nilCase rfl
+  | «continue» => exact nilCase rfl
+  | «leave» => exact nilCase rfl
+
+theorem stmts_added {funs : FunEnv D} : ∀ {ss : List (Stmt Op)} {V st Vb st' o},
+    Step D funs V st (.stmts ss) (.sres Vb st' o) → ∀ {A : List Ident},
+    Vb.map Prod.fst = A ++ V.map Prod.fst → ∀ x ∈ A, x ∈ declaredNamesStmts ss
+  | [], V, st, Vb, st', o, h, A, hA, x, hx => by
+      cases h with
+      | seqNil => obtain rfl := append_nil_of_eq hA; exact absurd hx (by simp)
+  | s :: rest, V, st, Vb, st', o, h, A, hA, x, hx => by
+      cases h with
+      | seqCons hs htail =>
+          obtain ⟨As, hAs⟩ := venvKeys_suffix hs rfl
+          obtain ⟨Ar, hAr⟩ := venvKeys_suffix htail rfl
+          have key2 : Vb.map Prod.fst = (Ar ++ As) ++ V.map Prod.fst := by
+            rw [← hAr, ← hAs]; exact (List.append_assoc Ar As (V.map Prod.fst)).symm
+          obtain rfl := List.append_cancel_right (hA.symm.trans key2)
+          simp only [declaredNamesStmts, List.mem_append]
+          rcases List.mem_append.1 hx with hxr | hxs
+          · exact Or.inr (stmts_added htail hAr.symm x hxr)
+          · exact Or.inl (stmt_added hs hAs.symm x hxs)
+      | seqStop hs _ =>
+          simp only [declaredNamesStmts, List.mem_append]
+          exact Or.inl (stmt_added hs hA x hx)
+  termination_by ss => sizeOf ss
+
 end YulEvmCompiler.Optimizer
