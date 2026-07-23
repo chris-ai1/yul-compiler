@@ -8,6 +8,7 @@ import YulEvmCompiler.Optimizer.Implementation.FreshenCallsResolve
 import YulEvmCompiler.Optimizer.Implementation.HoistCallsResolve
 import YulEvmCompiler.Optimizer.Implementation.StorageForwardResolve
 import YulEvmCompiler.Optimizer.Implementation.ObjectPass
+import YulEvmCompiler.Optimizer.Implementation.Normalization.NormalizePasses
 import YulEvmCompiler.Optimizer.Implementation.Normalization.HoistForInitResolve
 set_option warningAsError true
 /-!
@@ -308,5 +309,60 @@ theorem optimizerPipelineObject_correct
         ((out = .normal ∧ s'.halt = .Success ∧ s'.hReturn = .empty) ∨
          (out = .halt ∧ HaltedMatch yst s')) :=
   optimizerPipelineObjectRounds_correct hexternal pipelineRounds hcomp hrun
+
+/-! ### The normalized pipeline: normalization prefix + optimizer rounds
+
+The whole-program normalization passes (`Normalize.normalizationPasses`:
+disambiguate → hoist function definitions → flatten blocks, each individually
+guarded and unconditionally sound) run **once, up front**, before the iterated
+optimizer rounds; `hoistForInit` already leads every round as a `LocalPass`.
+The composition is itself a `GlobalPass`, so the whole normalized pipeline is
+covered by `GlobalPass.optimize_then_compileObject_correct`. -/
+
+/-- The full normalized optimizer as one verified global pass: the
+normalization prefix, then the verified object pipeline on every code block. -/
+def normalizedObjectPipeline : GlobalPass D :=
+  GlobalPass.comp
+    ((objectPipeline (calls := calls) (creates := creates)).toGlobal)
+    (Normalize.normalizationPasses)
+
+/-- Production entry point: normalize (whole-program passes), then run the
+iterated object pipeline on every code block of the tree. -/
+def optimizerPipelineObjectNormalized : Object Op → Object Op :=
+  (normalizedObjectPipeline (calls := calls) (creates := creates)).run
+
+@[simp] theorem optimizerPipelineObjectNormalized_def (o : Object Op) :
+    optimizerPipelineObjectNormalized (calls := calls) (creates := creates) o
+      = mapObjCode (objectPipeline (calls := calls) (creates := creates)).run
+          ((Normalize.normalizationPasses (calls := calls) (creates := creates)).run o) := rfl
+
+/-- **The normalized-pipeline artifact is a verified compilation of the source
+object**: compiling the normalized-and-optimized tree correctly simulates the
+*original* object's resolved run (via the pass's whole-tree `Run`-equivalence),
+under the usual layout-coupling side conditions. -/
+theorem optimizerPipelineObjectNormalized_compileObject_correct
+    [model : ExternalModel] (hexternal : ExternalsRealized model)
+    {o : Object Op} {L : Layout}
+    (hcomp : compileObject
+      (optimizerPipelineObjectNormalized
+        (calls := model.calls) (creates := model.creates) o) = some L)
+    (hres₀ : resolveForLayoutStmts L o.codeBlock = o.codeBlock)
+    (hres₁ : resolveForLayoutStmts L
+        (optimizerPipelineObjectNormalized
+          (calls := model.calls) (creates := model.creates) o).codeBlock
+      = (optimizerPipelineObjectNormalized
+          (calls := model.calls) (creates := model.creates) o).codeBlock)
+    {V : VEnv (evmWithExternal model.calls model.creates)}
+    {yst : EvmState} {out : Outcome}
+    (hrun : RunResolvedObject o L V yst out) :
+    ∃ b : Nat, ∀ s0 : State,
+      FrameOK (mkCode L.code) s0 → StateMatch L.initState s0 →
+      s0.pc = UInt256.ofNat 0 → s0.stack = [] → b ≤ s0.gasAvailable →
+      ∃ s', Steps s0 s' ∧ s'.callStack = [] ∧ StateMatch yst s' ∧
+        ((out = .normal ∧ s'.halt = .Success ∧ s'.hReturn = .empty) ∨
+         (out = .halt ∧ HaltedMatch yst s')) :=
+  GlobalPass.optimize_then_compileObject_correct
+    (normalizedObjectPipeline (calls := model.calls) (creates := model.creates))
+    hexternal hcomp hres₀ hres₁ hrun
 
 end YulEvmCompiler.Optimizer

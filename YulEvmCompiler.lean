@@ -45,5 +45,7 @@ import YulEvmCompiler.Optimizer.Implementation.Normalization.DisambiguateNormalF
 import YulEvmCompiler.Optimizer.Implementation.Normalization.ANFBlockScopedSound
 import YulEvmCompiler.Optimizer.Implementation.Normalization.HoistFunDefsEquiv
 import YulEvmCompiler.Optimizer.Implementation.Normalization.HoistFunDefsPass
+import YulEvmCompiler.Optimizer.Implementation.Normalization.SourceCheck
+import YulEvmCompiler.Optimizer.Implementation.Normalization.NormalizePasses
 import YulEvmCompiler.Optimizer.Implementation.Normalization.FlattenBlocks
 import YulEvmCompiler.Optimizer.Implementation.Normalization.FlattenBlocksSound
