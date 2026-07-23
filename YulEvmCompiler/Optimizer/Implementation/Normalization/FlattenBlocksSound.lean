@@ -1111,4 +1111,95 @@ theorem flatten_equivBlock (b : List (Stmt Op)) (hnf : NoFunDefStmts b)
 termination_by sizeOf b
 decreasing_by exact hb'
 
+/-- The root's hoisted function scope relates to the flattened root's by `ScopeRel`:
+same names and signatures, with each function body `EquivBlock`-equivalent to its
+flattening (via `flatten_equivBlock`, since every body is funDef-free). -/
+theorem hoist_flatten_scopeRel : ∀ (b : List (Stmt Op)), FunctionsHoisted b →
+    ∀ {vs fs : List Ident}, ScopedStmts vs fs b →
+      (∀ x ∈ vs, x ∉ declaredNamesStmts b) → (declaredNamesStmts b).Nodup →
+      ForInitEmptyStmts b →
+      ScopeRel (evmWithExternal calls creates) (hoist D b) (hoist D (flattenStmts b)) := by
+  intro b
+  induction b with
+  | nil => intro _ _ _ _ _ _ _; exact List.Forall₂.nil
+  | cons s rest ih =>
+      intro hFH vs fs hsc hfresh huniq hFIE
+      have hHT : HoistedTop s := hFH s (by simp)
+      have hscP : ScopedStmt vs fs s ∧ ScopedStmts (vs ++ declTopVars s) fs rest := hsc
+      have hnd := List.nodup_append.mp huniq
+      have hfreshR : ∀ x ∈ vs ++ declTopVars s, x ∉ declaredNamesStmts rest := by
+        intro x hx hxr
+        rcases List.mem_append.1 hx with hv | hd
+        · exact hfresh x hv (by simp only [declaredNamesStmts, List.mem_append]; exact Or.inr hxr)
+        · exact hnd.2.2 x (declTopVars_subset hd) x hxr rfl
+      have hrec := ih (fun x hx => hFH x (List.mem_cons_of_mem s hx)) hscP.2 hfreshR hnd.2.1 hFIE.2
+      cases s with
+      | funDef n ps rs body =>
+          have hnfBody : NoFunDefStmts body := by simpa [HoistedTop, NoFunDefStmt] using hHT
+          have hscBody : ScopedStmts (ps ++ rs) fs body := by
+            have h2 : ScopedStmts (ps ++ rs) (fs ++ funDefNames body) body := hscP.1
+            rwa [funDefNames_nil_of_noFunDef hnfBody, List.append_nil] at h2
+          have hndCons : (n :: (ps ++ rs ++ declaredNamesStmts body)).Nodup := by
+            simpa [declaredNamesStmt] using hnd.1
+          have hnd2 := List.nodup_append.mp (List.nodup_cons.mp hndCons).2
+          have hEq : EquivBlock D body (flattenStmts body) :=
+            flatten_equivBlock body hnfBody hscBody
+              (fun x hv hx => hnd2.2.2 x hv x hx rfl) hnd2.2.1
+              (by simpa [ForInitEmptyStmt] using hFIE.1)
+          have hL : hoist D (Stmt.funDef n ps rs body :: rest)
+              = (n, ⟨ps, rs, body⟩) :: hoist D rest := rfl
+          have hR : hoist D (flattenStmts (Stmt.funDef n ps rs body :: rest))
+              = (n, ⟨ps, rs, flattenStmts body⟩) :: hoist D (flattenStmts rest) := rfl
+          rw [hL, hR]
+          exact List.Forall₂.cons ⟨rfl, rfl, rfl, hEq⟩ hrec
+      | block inner =>
+          have hnfInner : NoFunDefStmts inner := by simpa [HoistedTop, NoFunDefStmt] using hHT
+          have hR : hoist D (flattenStmts (Stmt.block inner :: rest)) = hoist D (flattenStmts rest) := by
+            rw [show flattenStmts (Stmt.block inner :: rest)
+                  = flattenStmts inner ++ flattenStmts rest from by simp [flattenStmts, flattenStmt],
+              hoist_append, hoist_flatten_eq_nil hnfInner, List.nil_append]
+          rw [show hoist D (Stmt.block inner :: rest) = hoist D rest from rfl, hR]; exact hrec
+      | cond c body => exact hrec
+      | «switch» c cs d => exact hrec
+      | forLoop i c p bb => exact hrec
+      | letDecl vars val => exact hrec
+      | assign vars val => exact hrec
+      | exprStmt e => exact hrec
+      | «break» => exact hrec
+      | «continue» => exact hrec
+      | «leave» => exact hrec
+
+/-- **Soundness of block flattening.** Under global name uniqueness, well-scopedness,
+hoisted functions, and empty `for`-inits — all `NormalForm` fields — the flattened
+program is `EquivBlock`-equivalent to the original. -/
+theorem flattenBlock_sound (b : List (Stmt Op)) (hFH : FunctionsHoisted b)
+    (hsc : WellScoped b) (huniq : UniqueNames b) (hFIE : ForInitEmpty b) :
+    EquivBlock D b (flattenBlock b) := by
+  have hvac : ∀ x ∈ ([] : List Ident), x ∉ declaredNamesStmts b := by intro x hx; simp at hx
+  have ih : FlattenIH calls creates b := by
+    intro b' hb' hnf' vs' fs' hsc' hfr' hun' hfie'
+    exact flatten_equivBlock b' hnf' hsc' hfr' hun' hfie'
+  have hScope : ScopeRel D (hoist D b) (hoist D (flattenStmts b)) :=
+    hoist_flatten_scopeRel b hFH hsc hvac huniq hFIE
+  intro funs V st V' st' o
+  have hFRel : FunsRel D (hoist D b :: funs) (hoist D (flattenStmts b) :: funs) :=
+    List.Forall₂.cons hScope (FunsRel.refl funs)
+  constructor
+  · intro hh
+    cases hh with
+    | block hb =>
+        rename_i Vb
+        have hb2 := Step.funs_congr hb hFRel
+        obtain ⟨Vb', hstep', hres⟩ := core_fwd ih hFH hsc hvac huniq hFIE hb2
+        show Step D funs V st (.stmt (.block (flattenStmts b))) (.sres (restore V Vb) st' o)
+        rw [hres]; exact Step.block hstep'
+  · intro hh
+    cases hh with
+    | block hb =>
+        rename_i Vb'
+        have hb2 := Step.funs_congr hb (FunsRel.symm hFRel)
+        obtain ⟨Vb, hstep, hres⟩ := core_bwd ih hFH hsc hvac huniq hFIE hb2
+        show Step D funs V st (.stmt (.block b)) (.sres (restore V Vb') st' o)
+        rw [hres]; exact Step.block hstep
+
 end YulEvmCompiler.Optimizer
