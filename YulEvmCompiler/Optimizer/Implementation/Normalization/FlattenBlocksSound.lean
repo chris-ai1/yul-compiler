@@ -189,4 +189,59 @@ theorem framePrefixAdd_stmts {funs : FunEnv D} {ss : List (Stmt Op)} {V st Vb st
       · rw [hres'']
         exact restore_insAt_le hins3 (by simp)
 
+/-! ## Flattening preserves `mentions`
+
+Flattening relocates statements but neither adds nor removes a variable use or
+declaration, so a name is mentioned in the flattening iff it is mentioned in the
+original. Hence "unmentioned by `rest`" transfers to `flattenStmts rest`. -/
+
+theorem stmtsMentions_append {x : Ident} {a b : List (Stmt Op)} :
+    stmtsMentions x (a ++ b) = (stmtsMentions x a || stmtsMentions x b) := by
+  induction a with
+  | nil => simp [stmtsMentions]
+  | cons s rest ih => simp [stmtsMentions, ih, Bool.or_assoc]
+
+mutual
+theorem mentions_flattenStmt {x : Ident} (s : Stmt Op) :
+    stmtsMentions x (flattenStmt s) = stmtMentions x s := by
+  cases s with
+  | block body => simpa [flattenStmt, stmtMentions] using mentions_flattenStmts (x := x) body
+  | funDef n ps rs body =>
+      simp [flattenStmt, stmtsMentions, stmtMentions, mentions_flattenStmts (x := x) body]
+  | cond c body =>
+      simp [flattenStmt, stmtsMentions, stmtMentions, mentions_flattenStmts (x := x) body]
+  | «switch» c cs d =>
+      simp [flattenStmt, stmtsMentions, stmtMentions, mentions_flattenCases (x := x) cs,
+            mentions_flattenDflt (x := x) d]
+  | forLoop i c p b =>
+      simp [flattenStmt, stmtsMentions, stmtMentions, mentions_flattenStmts (x := x) i,
+            mentions_flattenStmts (x := x) p, mentions_flattenStmts (x := x) b]
+  | letDecl vars v => simp [flattenStmt, stmtsMentions, stmtMentions]
+  | assign vars v => simp [flattenStmt, stmtsMentions, stmtMentions]
+  | exprStmt e => simp [flattenStmt, stmtsMentions, stmtMentions]
+  | «break» => simp [flattenStmt, stmtsMentions, stmtMentions]
+  | «continue» => simp [flattenStmt, stmtsMentions, stmtMentions]
+  | «leave» => simp [flattenStmt, stmtsMentions, stmtMentions]
+theorem mentions_flattenStmts {x : Ident} (ss : List (Stmt Op)) :
+    stmtsMentions x (flattenStmts ss) = stmtsMentions x ss := by
+  cases ss with
+  | nil => rfl
+  | cons s rest =>
+      simp [flattenStmts, stmtsMentions_append, mentions_flattenStmt (x := x) s,
+            mentions_flattenStmts (x := x) rest, stmtsMentions]
+theorem mentions_flattenCases {x : Ident} (cs : List (Literal × List (Stmt Op))) :
+    casesMentions x (flattenCases cs) = casesMentions x cs := by
+  cases cs with
+  | nil => rfl
+  | cons hd tl =>
+      obtain ⟨l, b⟩ := hd
+      simp [flattenCases, casesMentions, mentions_flattenStmts (x := x) b,
+            mentions_flattenCases (x := x) tl]
+theorem mentions_flattenDflt {x : Ident} (d : Option (List (Stmt Op))) :
+    optBlockMentions x (flattenDflt d) = optBlockMentions x d := by
+  cases d with
+  | none => rfl
+  | some b => simpa [flattenDflt, optBlockMentions] using mentions_flattenStmts (x := x) b
+end
+
 end YulEvmCompiler.Optimizer
