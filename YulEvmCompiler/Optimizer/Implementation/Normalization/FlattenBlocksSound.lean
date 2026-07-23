@@ -419,4 +419,19 @@ theorem scopedDflt_mentions {vs fs : List Ident} {x : Ident}
       simpa [declaredNamesDflt] using scopedStmts_mentions hsc hm
 end
 
+/-! ## Restore depends only on the base length
+
+`restore base X` keeps the last `base.length` entries of `X`, so it is
+insensitive to the *contents* of `base`; two bases of equal length restore
+identically, and restoring twice (outer within inner) collapses to the outer. -/
+
+theorem restore_len_eq {base1 base2 X : VEnv D} (h : base1.length = base2.length) :
+    restore base1 X = restore base2 X := by
+  simp only [restore, h]
+
+/-- Executing a statement sequence never shrinks the environment. -/
+theorem stmts_len {funs : FunEnv D} {ss : List (Stmt Op)} {V st Vb st' o}
+    (h : Step D funs V st (.stmts ss) (.sres Vb st' o)) : V.length ≤ Vb.length :=
+  venvLen_mono h rfl
+
 end YulEvmCompiler.Optimizer
