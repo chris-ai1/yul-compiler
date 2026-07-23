@@ -157,4 +157,36 @@ theorem block_unwrap {funs : FunEnv D} {V st V' st' o} {body : List (Stmt Op)}
     rw [← hh] at hpush
     exact Step.block hpush
 
+/-! ## Framing an unmentioned prefix
+
+The leaked locals of a spliced block form a prefix prepended above the block's
+base environment. If a statement list mentions none of those names, running it
+from the extended environment mirrors running it from the base — and, crucially,
+`restore` to the base drops the same frame on both sides (each inserted binding
+sits at depth ≥ the base length, so `restore_insAt_le` erases it). Proved by
+iterating the single-variable `frameAdd`. -/
+
+theorem framePrefixAdd_stmts {funs : FunEnv D} {ss : List (Stmt Op)} {V st Vb st' o}
+    (h : Step D funs V st (.stmts ss) (.sres Vb st' o)) :
+    ∀ (pre : VEnv D), (∀ p ∈ pre, stmtsMentions p.1 ss = false) →
+      ∃ Vb', Step D funs (pre ++ V) st (.stmts ss) (.sres Vb' st' o) ∧
+        restore V Vb = restore V Vb' := by
+  intro pre
+  induction pre with
+  | nil => intro _; exact ⟨Vb, by simpa using h, rfl⟩
+  | cons p pre' ih =>
+      intro hm
+      obtain ⟨Vb'', hstep'', hres''⟩ := ih (fun q hq => hm q (List.mem_cons_of_mem _ hq))
+      have hins : InsAt (pre' ++ V).length p.1 p.2 (pre' ++ V) ((p.1, p.2) :: (pre' ++ V)) :=
+        ⟨[], pre' ++ V, rfl, rfl, rfl⟩
+      have hmp : codeMentions p.1 (Code.stmts ss) = false := by
+        simpa [codeMentions] using hm p (by simp)
+      obtain ⟨res2, hstep2, hrel⟩ := frameAdd hstep'' hins hmp
+      obtain ⟨Vb3, rfl, hins3⟩ := hrel.sres
+      refine ⟨Vb3, ?_, ?_⟩
+      · have : ((p.1, p.2) :: (pre' ++ V)) = (p :: pre') ++ V := by simp
+        rwa [this] at hstep2
+      · rw [hres'']
+        exact restore_insAt_le hins3 (by simp)
+
 end YulEvmCompiler.Optimizer
