@@ -1,5 +1,6 @@
 import YulEvmCompiler.Optimizer.Implementation.Normalization.FlattenBlocks
 import YulEvmCompiler.Optimizer.Implementation.DeadLits
+import YulEvmCompiler.Optimizer.Implementation.StackLayoutSound
 set_option warningAsError true
 /-!
 # YulEvmCompiler.Optimizer.Implementation.Normalization.FlattenBlocksSound
@@ -90,7 +91,7 @@ theorem noFunDef_flattenStmt {s : Stmt Op} (h : NoFunDefStmt s) :
   | cond c body =>
       simp only [flattenStmt, NoFunDefStmts, NoFunDefStmt, and_true]
       exact noFunDef_flattenStmts (by simpa [NoFunDefStmt] using h)
-  | switch c cs d =>
+  | «switch» c cs d =>
       simp only [flattenStmt, NoFunDefStmts, NoFunDefStmt, and_true]
       exact ⟨noFunDef_flattenCases (by simpa [NoFunDefStmt] using h.1),
              noFunDef_flattenDflt (by simpa [NoFunDefStmt] using h.2)⟩
@@ -104,7 +105,7 @@ theorem noFunDef_flattenStmt {s : Stmt Op} (h : NoFunDefStmt s) :
   | exprStmt e => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
   | «break» => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
   | «continue» => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
-  | leave => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
+  | «leave» => simp [flattenStmt, NoFunDefStmts, NoFunDefStmt]
 theorem noFunDef_flattenStmts {ss : List (Stmt Op)} (h : NoFunDefStmts ss) :
     NoFunDefStmts (flattenStmts ss) := by
   cases ss with
@@ -131,5 +132,29 @@ end
 theorem hoist_flatten_eq_nil {ss : List (Stmt Op)} (h : NoFunDefStmts ss) :
     hoist D (flattenStmts ss) = [] :=
   hoist_eq_nil_of_noFunDef (noFunDef_flattenStmts h)
+
+/-! ## Unwrapping a funDef-free block
+
+Executing a bare `block body` whose `body` is funDef-free is exactly executing
+`body`'s statements inline (its hoisted scope is empty, transparent by
+`EmptyScopeRel`), with the block's exit `restore` made explicit. This is the
+seam that flattening removes. -/
+
+theorem block_unwrap {funs : FunEnv D} {V st V' st' o} {body : List (Stmt Op)}
+    (hnf : NoFunDefStmts body) :
+    Step D funs V st (.stmt (.block body)) (.sres V' st' o) ↔
+      ∃ Vb, V' = restore V Vb ∧ Step D funs V st (.stmts body) (.sres Vb st' o) := by
+  have hh : hoist D body = [] := hoist_eq_nil_of_noFunDef hnf
+  constructor
+  · intro h
+    cases h with
+    | block hbody =>
+        rw [hh] at hbody
+        exact ⟨_, rfl, Step.emptyScope_congr hbody (EmptyScopeRel.drop funs)⟩
+  · rintro ⟨Vb, rfl, hbody⟩
+    have hpush : Step D ([] :: funs) V st (.stmts body) (.sres Vb st' o) :=
+      Step.emptyScope_congr hbody (EmptyScopeRel.add funs)
+    rw [← hh] at hpush
+    exact Step.block hpush
 
 end YulEvmCompiler.Optimizer
