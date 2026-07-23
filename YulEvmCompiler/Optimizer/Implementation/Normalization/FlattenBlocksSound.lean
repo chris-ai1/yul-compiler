@@ -244,4 +244,179 @@ theorem mentions_flattenDflt {x : Ident} (d : Option (List (Stmt Op))) :
   | some b => simpa [flattenDflt, optBlockMentions] using mentions_flattenStmts (x := x) b
 end
 
+/-! ## Well-scoped ⇒ every mentioned name is in scope or locally declared
+
+Bridge from the `NormalForm.WellScoped` precondition to `mentions`: if a name is
+mentioned (used or declared) in a well-scoped statement list, it is either in the
+incoming variable scope `vs` or declared somewhere in the list. Consequently a
+name declared *inside* a sibling block (hence not in `vs`, by uniqueness) and not
+declared in the list is not mentioned — the fact the frame step needs. -/
+
+mutual
+theorem scopedExpr_mentions {vs fs : List Ident} {x : Ident} {e : Expr Op}
+    (hsc : ScopedExpr vs fs e) (hm : exprMentions x e = true) : x ∈ vs := by
+  cases e with
+  | lit l => simp [exprMentions] at hm
+  | var y =>
+      simp only [exprMentions] at hm
+      have : x = y := by simpa using hm
+      subst this; simpa [ScopedExpr] using hsc
+  | builtin op args =>
+      exact scopedArgs_mentions (by simpa [ScopedExpr] using hsc) (by simpa [exprMentions] using hm)
+  | call fn args =>
+      simp only [ScopedExpr] at hsc
+      exact scopedArgs_mentions hsc.2 (by simpa [exprMentions] using hm)
+theorem scopedArgs_mentions {vs fs : List Ident} {x : Ident} {es : List (Expr Op)}
+    (hsc : ScopedArgs vs fs es) (hm : argsMentions x es = true) : x ∈ vs := by
+  cases es with
+  | nil => simp [argsMentions] at hm
+  | cons e rest =>
+      simp only [ScopedArgs] at hsc
+      simp only [argsMentions, Bool.or_eq_true] at hm
+      rcases hm with h | h
+      · exact scopedExpr_mentions hsc.1 h
+      · exact scopedArgs_mentions hsc.2 h
+end
+
+theorem declTopVars_subset {s : Stmt Op} {x : Ident} (h : x ∈ declTopVars s) :
+    x ∈ declaredNamesStmt s := by
+  cases s <;> simp_all [declTopVars, declaredNamesStmt]
+
+theorem declTopVarsL_subset {ss : List (Stmt Op)} {x : Ident} (h : x ∈ declTopVarsL ss) :
+    x ∈ declaredNamesStmts ss := by
+  induction ss with
+  | nil => simp [declTopVarsL] at h
+  | cons s rest ih =>
+      simp only [declTopVarsL, List.flatMap_cons, List.mem_append] at h
+      simp only [declaredNamesStmts, List.mem_append]
+      rcases h with h | h
+      · exact Or.inl (declTopVars_subset h)
+      · exact Or.inr (ih (by simpa [declTopVarsL] using h))
+
+mutual
+theorem scopedStmt_mentions {vs fs : List Ident} {x : Ident} {s : Stmt Op}
+    (hsc : ScopedStmt vs fs s) (hm : stmtMentions x s = true) :
+    x ∈ vs ∨ x ∈ declaredNamesStmt s := by
+  cases s with
+  | block body =>
+      simp only [ScopedStmt] at hsc
+      simp only [stmtMentions] at hm
+      simpa [declaredNamesStmt] using scopedStmts_mentions hsc hm
+  | funDef n ps rs body =>
+      simp only [ScopedStmt] at hsc
+      simp only [stmtMentions, Bool.or_eq_true, decide_eq_true_eq] at hm
+      simp only [declaredNamesStmt, List.mem_cons, List.mem_append]
+      rcases hm with (hp | hp) | hb
+      · tauto
+      · tauto
+      · have h2 := scopedStmts_mentions hsc hb
+        rw [List.mem_append] at h2; tauto
+  | letDecl vars val =>
+      cases val with
+      | none =>
+          simp only [stmtMentions, optExprMentions, Bool.or_false, decide_eq_true_eq] at hm
+          exact Or.inr (by simpa [declaredNamesStmt] using hm)
+      | some e =>
+          simp only [ScopedStmt] at hsc
+          simp only [stmtMentions, optExprMentions, Bool.or_eq_true, decide_eq_true_eq] at hm
+          rcases hm with hv | he
+          · exact Or.inr (by simpa [declaredNamesStmt] using hv)
+          · exact Or.inl (scopedExpr_mentions hsc he)
+  | assign vars val =>
+      simp only [ScopedStmt] at hsc
+      simp only [stmtMentions, Bool.or_eq_true, decide_eq_true_eq] at hm
+      rcases hm with hv | he
+      · exact Or.inl (hsc.1 x hv)
+      · exact Or.inl (scopedExpr_mentions hsc.2 he)
+  | cond c body =>
+      simp only [ScopedStmt] at hsc
+      simp only [stmtMentions, Bool.or_eq_true] at hm
+      rcases hm with hc | hb
+      · exact Or.inl (scopedExpr_mentions hsc.1 hc)
+      · simpa [declaredNamesStmt] using scopedStmts_mentions hsc.2 hb
+  | «switch» c cs d =>
+      simp only [ScopedStmt] at hsc
+      simp only [stmtMentions, Bool.or_eq_true] at hm
+      simp only [declaredNamesStmt, List.mem_append]
+      rcases hm with (hc | hcs) | hdf
+      · exact Or.inl (scopedExpr_mentions hsc.1 hc)
+      · have := scopedCases_mentions hsc.2.1 hcs; tauto
+      · have := scopedDflt_mentions hsc.2.2 hdf; tauto
+  | forLoop init c post body =>
+      simp only [ScopedStmt] at hsc
+      obtain ⟨hi, hcnd, hp, hb⟩ := hsc
+      simp only [stmtMentions, Bool.or_eq_true] at hm
+      simp only [declaredNamesStmt, List.mem_append]
+      rcases hm with ((hmi | hmc) | hmp) | hmb
+      · have := scopedStmts_mentions hi hmi; tauto
+      · have h2 := scopedExpr_mentions hcnd hmc
+        rw [List.mem_append] at h2
+        rcases h2 with hv | hv
+        · exact Or.inl hv
+        · have := declTopVarsL_subset hv; tauto
+      · have h2 := scopedStmts_mentions hp hmp
+        rcases h2 with hv | hd
+        · rw [List.mem_append] at hv
+          rcases hv with hv | hv
+          · exact Or.inl hv
+          · have := declTopVarsL_subset hv; tauto
+        · tauto
+      · have h2 := scopedStmts_mentions hb hmb
+        rcases h2 with hv | hd
+        · rw [List.mem_append] at hv
+          rcases hv with hv | hv
+          · exact Or.inl hv
+          · have := declTopVarsL_subset hv; tauto
+        · tauto
+  | exprStmt e =>
+      simp only [ScopedStmt] at hsc
+      simp only [stmtMentions] at hm
+      exact Or.inl (scopedExpr_mentions hsc hm)
+  | «break» => simp [stmtMentions] at hm
+  | «continue» => simp [stmtMentions] at hm
+  | «leave» => simp [stmtMentions] at hm
+theorem scopedStmts_mentions {vs fs : List Ident} {x : Ident} {ss : List (Stmt Op)}
+    (hsc : ScopedStmts vs fs ss) (hm : stmtsMentions x ss = true) :
+    x ∈ vs ∨ x ∈ declaredNamesStmts ss := by
+  cases ss with
+  | nil => simp [stmtsMentions] at hm
+  | cons s rest =>
+      simp only [ScopedStmts] at hsc
+      simp only [stmtsMentions, Bool.or_eq_true] at hm
+      simp only [declaredNamesStmts, List.mem_append]
+      rcases hm with h | h
+      · have := scopedStmt_mentions hsc.1 h; tauto
+      · have h2 := scopedStmts_mentions hsc.2 h
+        rcases h2 with hv | hd
+        · rw [List.mem_append] at hv
+          rcases hv with hv | hv
+          · exact Or.inl hv
+          · have := declTopVars_subset hv; tauto
+        · tauto
+theorem scopedCases_mentions {vs fs : List Ident} {x : Ident}
+    {cs : List (Literal × List (Stmt Op))}
+    (hsc : ScopedCases vs fs cs) (hm : casesMentions x cs = true) :
+    x ∈ vs ∨ x ∈ declaredNamesCases cs := by
+  cases cs with
+  | nil => simp [casesMentions] at hm
+  | cons hd tl =>
+      obtain ⟨l, b⟩ := hd
+      simp only [ScopedCases] at hsc
+      simp only [casesMentions, Bool.or_eq_true] at hm
+      simp only [declaredNamesCases, List.mem_append]
+      rcases hm with h | h
+      · have := scopedStmts_mentions hsc.1 h; tauto
+      · have := scopedCases_mentions hsc.2 h; tauto
+theorem scopedDflt_mentions {vs fs : List Ident} {x : Ident}
+    {d : Option (List (Stmt Op))}
+    (hsc : ScopedDflt vs fs d) (hm : optBlockMentions x d = true) :
+    x ∈ vs ∨ x ∈ declaredNamesDflt d := by
+  cases d with
+  | none => simp [optBlockMentions] at hm
+  | some b =>
+      simp only [ScopedDflt] at hsc
+      simp only [optBlockMentions] at hm
+      simpa [declaredNamesDflt] using scopedStmts_mentions hsc hm
+end
+
 end YulEvmCompiler.Optimizer
