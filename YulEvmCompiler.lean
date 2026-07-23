@@ -41,3 +41,5 @@ import YulEvmCompiler.Optimizer.Implementation.Normalization.DisambiguateSoundBw
 import YulEvmCompiler.Optimizer.Implementation.Normalization.DisambiguateRun
 import YulEvmCompiler.Optimizer.Implementation.Normalization.DisambiguateNormalForm
 import YulEvmCompiler.Optimizer.Implementation.Normalization.ANFBlockScopedSound
+import YulEvmCompiler.Optimizer.Implementation.Normalization.HoistFunDefsEquiv
+import YulEvmCompiler.Optimizer.Implementation.Normalization.HoistFunDefsPass

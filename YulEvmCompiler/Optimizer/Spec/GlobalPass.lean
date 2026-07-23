@@ -201,4 +201,32 @@ def LocalPass.toGlobal (P : LocalPass D) : GlobalPass D where
 @[simp] theorem LocalPass.toGlobal_run (P : LocalPass D) (o : Object D.Op) :
     P.toGlobal.run o = mapObjCode P.run o := rfl
 
+/-! ### Guard-and-no-op: lifting a conditionally-sound transform -/
+
+/-- The block transform underlying a guarded global pass: apply `run` where the
+`Bool` `guard` holds, else leave the block unchanged. -/
+def guardedBlock (guard : Block D.Op → Bool) (run : Block D.Op → Block D.Op)
+    (b : Block D.Op) : Block D.Op :=
+  if guard b = true then run b else b
+
+/-- **Guard-and-no-op combinator.** Turn a block transform that is only known
+semantics-preserving under a decidable `guard` into an *unconditionally* sound
+`GlobalPass`: it rewrites a code block exactly where `guard` holds (and where, by
+`h`, the rewrite preserves whole-program behaviour) and is the identity
+everywhere else. This packages the standard pattern for normalizations sound only
+under a precondition (uniqueness, well-scopedness, …) — the caller supplies the
+`guard`, the transform, and the conditional `RunEquivBlock`. -/
+def GlobalPass.ofGuardedBlock (guard : Block D.Op → Bool) (run : Block D.Op → Block D.Op)
+    (h : ∀ b, guard b = true → RunEquivBlock D b (run b)) : GlobalPass D where
+  run := mapObjCode (guardedBlock guard run)
+  sound := objEquiv_mapObjCode (fun b => by
+    unfold guardedBlock
+    by_cases hb : guard b = true
+    · rw [if_pos hb]; exact h b hb
+    · rw [if_neg hb]; exact RunEquivBlock.refl b)
+
+@[simp] theorem GlobalPass.ofGuardedBlock_run (guard : Block D.Op → Bool)
+    (run : Block D.Op → Block D.Op) (h) (o : Object D.Op) :
+    (GlobalPass.ofGuardedBlock guard run h).run o = mapObjCode (guardedBlock guard run) o := rfl
+
 end YulEvmCompiler.Optimizer
