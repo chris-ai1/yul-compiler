@@ -110,7 +110,7 @@ equivalentFunctionCombiner/simple_different_vars.yul	750	0
 equivalentFunctionCombiner/switch_case_order.yul	288	894
 expressionInliner/argument_duplication_heuristic.yul	2076	0
 expressionInliner/complex_with_evm.yul	276	0
-expressionInliner/double_calls.yul	570	0
+expressionInliner/double_calls.yul	450	0
 expressionInliner/no_inline_mload.yul	144	0
 expressionInliner/no_move_with_sideeffects.yul	1140	678
 expressionInliner/simple.yul	72	0
@@ -198,11 +198,11 @@ forLoopInitRewriter/nested.yul	11742	9474
 fullInliner/call_arguments_with_side_effects.yul	378	30
 fullInliner/call_arguments_without_side_effects.yul	432	0
 fullInliner/inside_condition.yul	25672	25499
-fullInliner/large_function_multi_use.yul	182490	182454
+fullInliner/large_function_multi_use.yul	182460	182454
 fullInliner/large_function_single_use.yul	47670	47562
 fullInliner/long_names.yul	216	336
 fullInliner/move_up_rightwards_argument.yul	726	0
-fullInliner/multi_fun.yul	576	0
+fullInliner/multi_fun.yul	390	0
 fullInliner/multi_return.yul	564	384
 fullInliner/no_inline_into_big_function.yul	144	0
 fullInliner/no_inline_leave.yul	336	0
@@ -233,7 +233,7 @@ fullSimplify/scoped_var_ref_in_function_call.yul	206196	206190
 fullSimplify/signextend.yul	144	228
 fullSimplify/smoke.yul	0	0
 fullSuite/abi2.yul	402	432
-fullSuite/abi_example1.yul	1512	1410
+fullSuite/abi_example1.yul	1392	1410
 fullSuite/and_or_combination.yul	143914	144022
 fullSuite/call_arguments_with_side_effects.yul	378	30
 fullSuite/call_arguments_without_side_effects.yul	13470	13956
@@ -344,11 +344,11 @@ loadResolver/simple_memory.yul	2302	2292
 loadResolver/staticcall.yul	236852	236882
 loadResolver/zero_length_reads.yul	54	48
 loopInvariantCodeMotion/create_sload.yul	1734744	1732656
-loopInvariantCodeMotion/move_storage_function.yul	24342	2370
+loopInvariantCodeMotion/move_storage_function.yul	23640	2370
 loopInvariantCodeMotion/no_move_immovables.yul	354	138
 loopInvariantCodeMotion/no_move_memory.yul	618	630
 loopInvariantCodeMotion/no_move_state.yul	599841178	599959551
-loopInvariantCodeMotion/no_move_state_function.yul	85328	45926
+loopInvariantCodeMotion/no_move_state_function.yul	84626	45926
 loopInvariantCodeMotion/no_move_storage_function.yul	55586	36800
 loopInvariantCodeMotion/no_move_transient_storage.yul	1190928	1190172
 loopInvariantCodeMotion/not_first.yul	63118	57502
@@ -467,7 +467,7 @@ unusedPruner/functions.yul	144	0
 unusedPruner/intermediate_assignment.yul	66	0
 unusedPruner/intermediate_multi_assignment.yul	204	174
 unusedPruner/keccak.yul	47400	47436
-unusedPruner/movable_user_defined_function.yul	360	0
+unusedPruner/movable_user_defined_function.yul	144	0
 unusedPruner/msize.yul	47202	47238
 unusedPruner/multi_assign.yul	264	186
 unusedPruner/multi_assignments.yul	132	0
@@ -533,7 +533,7 @@ unusedStoreEliminator/tstore.yul	134610	134544
 unusedStoreEliminator/unaligned_access.yul	180	174
 unusedStoreEliminator/unknown_length2.yul	27741	27599
 unusedStoreEliminator/unrelated_relative.yul	22229	22249
-varDeclInitializer/ambiguous.yul	570	252
+varDeclInitializer/ambiguous.yul	540	252
 varDeclInitializer/inside_func.yul	138	0
 varDeclInitializer/multi.yul	54	0
 varDeclInitializer/multi_assign.yul	72	0

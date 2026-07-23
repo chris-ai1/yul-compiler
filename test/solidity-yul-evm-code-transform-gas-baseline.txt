@@ -10,9 +10,9 @@ stackReuse/function_argument_reuse.yul	27692	27464
 stackReuse/function_argument_reuse_without_retparams.yul	25384	25511
 stackReuse/function_call.yul	186	480
 stackReuse/function_params.yul	72	0
-stackReuse/function_params_and_retparams.yul	414	0
-stackReuse/function_params_and_retparams_partly_used.yul	600	432
-stackReuse/function_retparam.yul	294	0
+stackReuse/function_params_and_retparams.yul	264	0
+stackReuse/function_params_and_retparams_partly_used.yul	480	432
+stackReuse/function_retparam.yul	264	0
 stackReuse/function_retparam_block.yul	318	0
 stackReuse/function_retparam_declaration.yul	318	0
 stackReuse/function_retparam_for.yul	444	174
