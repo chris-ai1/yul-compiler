@@ -189,6 +189,31 @@ theorem framePrefixAdd_stmts {funs : FunEnv D} {ss : List (Stmt Op)} {V st Vb st
       · rw [hres'']
         exact restore_insAt_le hins3 (by simp)
 
+/-- Backward companion of `framePrefixAdd_stmts`: running a statement list from an
+environment extended by an unmentioned prefix can be re-based to the shorter
+environment, preserving `restore` to that base. -/
+theorem framePrefixRemove_stmts {funs : FunEnv D} {ss : List (Stmt Op)} {V st st' o} :
+    ∀ (pre : VEnv D) {Vb' : VEnv D},
+    Step D funs (pre ++ V) st (.stmts ss) (.sres Vb' st' o) →
+    (∀ p ∈ pre, stmtsMentions p.1 ss = false) →
+    ∃ Vb, Step D funs V st (.stmts ss) (.sres Vb st' o) ∧ restore V Vb' = restore V Vb := by
+  intro pre
+  induction pre with
+  | nil => intro Vb' h _; exact ⟨Vb', by simpa using h, rfl⟩
+  | cons p pre' ih =>
+      intro Vb' h hm
+      have hins : InsAt (pre' ++ V).length p.1 p.2 (pre' ++ V) ((p.1, p.2) :: (pre' ++ V)) :=
+        ⟨[], pre' ++ V, rfl, rfl, rfl⟩
+      have hmp : codeMentions p.1 (Code.stmts ss) = false := by
+        simpa [codeMentions] using hm p (by simp)
+      have h' : Step D funs ((p.1, p.2) :: (pre' ++ V)) st (.stmts ss) (.sres Vb' st' o) := by
+        have he : ((p.1, p.2) :: (pre' ++ V)) = (p :: pre') ++ V := by simp
+        rw [he]; exact h
+      obtain ⟨res1, hstep1, hrel⟩ := frameRemove h' hins hmp
+      obtain ⟨Vb1, rfl, hins1⟩ := hrel.sres_right
+      obtain ⟨Vb, hstepV, hres⟩ := ih hstep1 (fun q hq => hm q (List.mem_cons_of_mem _ hq))
+      exact ⟨Vb, hstepV, (restore_insAt_le hins1 (by simp)).symm.trans hres⟩
+
 /-! ## Flattening preserves `mentions`
 
 Flattening relocates statements but neither adds nor removes a variable use or
