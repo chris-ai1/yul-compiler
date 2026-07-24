@@ -39,7 +39,17 @@ trusts `Spec/Pass.lean` need not read any individual pass proof.
   built on `ObsPass`, with the `OpMemorySafe` / reserved-interval premises that
   make raising the guard pointer honest rather than an unconditional weakening).
   Treat `Spec/` as near-frozen: changing a contract is a design decision, not a
-  pass addition.
+  pass addition. `PrePostPass.lean` adds the orthogonal "preserve, don't require"
+  framework (`SoundUnder pre` for soundness prerequisites, `Preserves I` for kept
+  invariants, `Establishes pre I` for the normalizer that reaches them, all with
+  `comp`/`ofList`). `DeclPreserving.lean` discharges the common `Preserves` case
+  without per-pass induction: a **declaration-non-generative** transform
+  (`PreservesDecls`: declared-name multiset never grows) preserves
+  `NormalForm.UniqueNames` (and any sub-multiset-antitone invariant) via one
+  kernel, and the proven-once traversal skeletons `mapExprsBlock` (expression
+  rewriting) and `filterStmtsDeep` (statement pruning) give preservation for free
+  to any pass expressed through them — the pattern that avoids re-proving
+  normal-form preservation for each optimization step.
 - `Core/` — the typed optimizer IR. `Basic.lean` is intrinsically-scoped ANF
   (arity-indexed pure ops; `ingest` is partial, `ingest_emit` erases back to the
   exact Yul input). `Rule.lean` is a generic first-match rewrite engine whose
