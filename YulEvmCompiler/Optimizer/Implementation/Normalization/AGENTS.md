@@ -47,7 +47,14 @@ Each `NormalForm` field is established by a dedicated normalization pass; severa
 are currently on unmerged branches (targeting `powdr-labs`) in *different*
 namespaces, which `NormalForm` deliberately does not import:
 
-- `IsANF` → `anf-normalizer` (`Normalization/ANF.lean`, `isANFStmts` Bool decider)
+- `IsANF` → **establishment landed**: `Normalization/ANF.lean` — `anfBlock P`
+  flattens every operand to an atom (top operator kept with atomized args;
+  `for`-conditions exempt) and `anf_isANF` / `anf_establishes_isANF` prove it
+  reaches `NormalForm.IsANF` for every prefix `P`. Operand preludes follow Yul's
+  right-to-left evaluation order, so it is soundness-ready, but the `EquivBlock`
+  soundness (fresh-binding non-capture) is **not** yet proved — so ANF is not yet
+  in `Pipeline.lean`. The heavy fresh-binding weakening on the old
+  `anf-normalizer` branch (`ANFSound`) is the reusable foundation for that step.
 - `UniqueNames` → **landed**: `Disambiguate/` (`Disambiguated` via `.Nodup`,
   bridged by `disambiguate_uniqueNames`; whole-program soundness
   `disambiguate_runEquivBlock` is *conditional* on assumed `SourceValid`
