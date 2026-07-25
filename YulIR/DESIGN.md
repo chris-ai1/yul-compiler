@@ -35,7 +35,7 @@ backend. Semantic soundness of `ofYul∘toYul` and of `optimize` is checked with
 
 ## Passes (`YulIR/Optimize.lean` = `optimize`)
 
-Order: `uniquify` → (`valueNumber` → `structural` → `deadStore` → `deadCode`) ×2.
+Order: `uniquify` → (`valueNumber` → `structural` → `storeElim` → `deadStore` → `deadCode`) ×2.
 
 | Pass | File | What | Provability notes |
 |---|---|---|---|
@@ -43,6 +43,7 @@ Order: `uniquify` → (`valueNumber` → `structural` → `deadStore` → `deadC
 | Simplify | `Simplify.lean` | local constant folding (via dialect `stepOp`) + algebraic identities | per-`Rhs`, local; folding delegates to the semantics |
 | ValueNumber | `ValueNumber.lean` | const/copy propagation, folding across `let`s, CSE — tracks only *immutable* values so no invalidation is ever needed | forward, monotone; immutability = never an `assign` target |
 | Structural | `Structural.lean` | dead-branch (`if 0`), constant `switch` selection, `if 1`→block, empty removal, and unreachable-code elimination (drop stmts after a terminator) | local, per-statement rewrites |
+| StoreElim | `StoreElim.lean` | remove an overwritten `sstore`/`mstore`/`tstore` — a store whose slot is provably re-stored (same stable location) before any read/escape of that domain (backward per-domain clobber analysis; `if`/`switch` intersect all paths; loops/functions conservative) | only removes a provably-overwritten store; overwrite is same-slot so memory expansion/`msize` is preserved exactly |
 | DeadStore | `DeadStore.lean` | remove `x := <pure rhs>` whose value is never observed (backward liveness; conservative for loops/`break`/`continue`; return vars protected) | only removes a provably-dead pure store |
 | DeadCode | `DeadCode.lean` | remove unused pure bindings, and pure statements like `pop(x)`; fixpoint | pure ⇒ no observable effect |
 
@@ -86,7 +87,8 @@ Current, on Solidity's `yulOptimizerTests`:
 * **Correctness**: full-corpus behaviour sweep = **0 miscompiles**; interp gate green on 57 progs.
 
 Done: uniquify · simplify · value-numbering (const/copy-prop, fold, CSE) · structural +
-unreachable-code · dead-store (unused-assignment) · dead pure bindings/statements.
+unreachable-code · dead-store (unused-assignment) · dead pure bindings/statements ·
+overwritten-store elimination (`sstore`/`mstore`/`tstore`).
 
 **Where the residual size gap is** (measured): dominated by `loopInvariantCodeMotion` (+4170) and
 `equalStore`/`unusedStore`. It is *not* CSE alone — gating CSE to expensive ops did not remove it,
@@ -100,10 +102,13 @@ Remaining to reach/exceed parity:
       capture-avoiding (unique names make this clean); mainly valuable for *unlocking*
       cross-call propagation. `leave` handling is the crux (restrict to leave-free,
       non-recursive, small bodies first).
-- [ ] **Load resolver** (`loadResolver`, `equalStoreEliminator`, `unusedStoreEliminator`):
-      memory/storage store→load forwarding + redundant/overwritten-store elimination
-      (needs an effect/aliasing model; the pure/effect split helps). Also recovers the
-      CSE-inflated storage-store categories.
+- [x] **Overwritten-store elimination** (`StoreElim.lean`, the overwrite direction of solc's
+      `equalStoreEliminator`/`unusedStoreEliminator`): drop an `sstore`/`mstore`/`tstore` whose
+      slot is re-stored before any read/escape of that domain. Uses a syntactic same-slot
+      aliasing model (stable atoms: literals + never-reassigned variables, post-`valueNumber`).
+- [ ] **Load resolver** (`loadResolver`): the *remaining* store→load forwarding — replace a
+      `load` of a slot with the value of a dominating store to it (needs the same aliasing model
+      extended forward). Would also recover the CSE-inflated storage-store categories.
 - [ ] **Rematerialization + a stack-aware cost model**: undo CSE (and later LICM) where the
       live-range extension costs more DUP/SWAP than recomputation saves. (CSE is kept on
       deliberately; this is its counterpart.)

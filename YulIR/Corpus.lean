@@ -236,6 +236,47 @@ def corpus : List (String × YulSemantics.Block EVM.Op) :=
         if eq(i, 2) { x := add(x, 10) continue }
         x := add(x, 1)
       }
-      sstore(0, x) }) ]
+      sstore(0, x) })
+  -- store-elimination targets: an overwritten sstore/mstore/tstore is dead
+  , ("storeElim/storage-overwrite", yul% {
+      sstore(0, calldataload(0))
+      sstore(0, calldataload(32)) })
+  , ("storeElim/storage-triple", yul% {
+      sstore(3, calldataload(0))
+      sstore(3, calldataload(32))
+      sstore(3, calldataload(64)) })
+  , ("storeElim/mem-overwrite", yul% {
+      mstore(64, calldataload(0))
+      mstore(64, calldataload(32))
+      sstore(0, mload(64)) })
+  , ("storeElim/trans-overwrite", yul% {
+      tstore(7, calldataload(0))
+      tstore(7, calldataload(32))
+      sstore(0, tload(7)) })
+  -- store-elimination must NOT fire when the value is observable
+  , ("storeElim/keep-read-between", yul% {
+      sstore(0, calldataload(0))
+      let z := sload(0)
+      sstore(0, calldataload(32))
+      sstore(1, z) })
+  , ("storeElim/keep-conditional", yul% {
+      sstore(0, 1)
+      if calldataload(0) { sstore(0, 2) }
+      sstore(1, sload(0)) })
+  , ("storeElim/keep-mutated-key", yul% {
+      let k := calldataload(0)
+      sstore(k, 1)
+      k := calldataload(32)
+      sstore(k, 2)
+      sstore(100, sload(0)) })
+  , ("storeElim/keep-before-terminator", yul% {
+      sstore(0, calldataload(0))
+      if calldataload(32) { return(0, 0) }
+      sstore(0, calldataload(64)) })
+  , ("storeElim/mem-keep-across-keccak", yul% {
+      mstore(0, calldataload(0))
+      let h := keccak256(0, 32)
+      mstore(0, calldataload(32))
+      sstore(0, h) }) ]
 
 end YulIR.Corpus
