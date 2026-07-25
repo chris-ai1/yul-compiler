@@ -5,10 +5,12 @@ set_option warningAsError true
 
 Execute bytecode emitted for the same Yul source by this compiler and by solc
 inside the same `evm-semantics` environment. The observation deliberately
-ignores bytecode, program counters, operand stacks, remaining gas, and zero-only
-memory expansion: those may differ between correct compilers. It compares
-termination, returned/revert bytes, returndata, nonzero memory, account
-existence/nonces/balances/storage, logs, self-destructs, and storage refunds.
+ignores bytecode, program counters, operand stacks, remaining gas, zero-only
+memory expansion, and gas-metering artifacts such as the SSTORE refund counter:
+those may differ between correct compilers, and the gas-free `yul-semantics`
+source does not model them. It compares termination, returned/revert bytes,
+returndata, nonzero memory, account existence/nonces/balances/storage, logs, and
+self-destructs — the observable *results*, not gas.
 
 Each program runs from Solidity's interpreter-test default environment, a
 fixed patterned state, and four states derived deterministically from its
@@ -45,7 +47,6 @@ structure Observation where
   accounts : Array ObservedAccount
   logs : Array ObservedLog
   selfDestructs : Array AccountAddress
-  refund : UInt256
   deriving BEq
 
 private def word (n : Nat) : UInt256 := UInt256.ofNat n
@@ -107,7 +108,6 @@ def observe (state : EVM.State) : Observation :=
     accounts := observedAccounts state
     logs := observedLogs state
     selfDestructs := state.substate.selfDestructList
-    refund := state.substate.refundBalance
   }
 
 private def patternedCalldata : ByteArray :=
@@ -224,7 +224,6 @@ private def mismatchSection (ours solc : Observation) : String :=
   else if ours.accounts != solc.accounts then "accounts/storage"
   else if ours.logs != solc.logs then "logs"
   else if ours.selfDestructs != solc.selfDestructs then "self-destruct list"
-  else if ours.refund != solc.refund then "storage refund"
   else "unknown observation"
 
 /-- Compare the observable behavior of two bytecode sequences under every

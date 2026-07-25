@@ -43,7 +43,7 @@ Order: `uniquify` → (`valueNumber` → `structural` → `storeElim` → `deadS
 | Simplify | `Simplify.lean` | local constant folding (via dialect `stepOp`) + algebraic identities | per-`Rhs`, local; folding delegates to the semantics |
 | ValueNumber | `ValueNumber.lean` | const/copy propagation, folding across `let`s, CSE — tracks only *immutable* values so no invalidation is ever needed | forward, monotone; immutability = never an `assign` target |
 | Structural | `Structural.lean` | dead-branch (`if 0`), constant `switch` selection, `if 1`→block, empty removal, and unreachable-code elimination (drop stmts after a terminator) | local, per-statement rewrites |
-| StoreElim | `StoreElim.lean` | remove an overwritten `sstore`/`mstore`/`tstore` — a store whose slot is provably re-stored (same stable location) before any read/escape of that domain (backward per-domain clobber analysis; `if`/`switch` intersect all paths; loops/functions conservative) | only removes a provably-overwritten store; overwrite is same-slot so memory expansion/`msize` is preserved exactly |
+| StoreElim | `StoreElim.lean` | remove an overwritten `sstore`/`mstore`/`tstore` — a store whose slot is provably re-stored (same stable location) before any read/escape of that domain (backward per-domain clobber analysis; `if`/`switch` intersect all paths; loops/functions conservative) | only removes a provably-overwritten store; value-independent since the gas-free source models no refund; overwrite is same-slot so contents and `msize` are preserved exactly |
 | DeadStore | `DeadStore.lean` | remove `x := <pure rhs>` whose value is never observed (backward liveness; conservative for loops/`break`/`continue`; return vars protected) | only removes a provably-dead pure store |
 | DeadCode | `DeadCode.lean` | remove unused pure bindings, and pure statements like `pop(x)`; fixpoint | pure ⇒ no observable effect |
 
@@ -106,6 +106,8 @@ Remaining to reach/exceed parity:
       `equalStoreEliminator`/`unusedStoreEliminator`): drop an `sstore`/`mstore`/`tstore` whose
       slot is re-stored before any read/escape of that domain. Uses a syntactic same-slot
       aliasing model (stable atoms: literals + never-reassigned variables, post-`valueNumber`).
+      Value-independent: the gas-free source models no `SSTORE` refund, so overwrite deadness does
+      not depend on the stored value (the differential harness likewise ignores the refund).
 - [ ] **Load resolver** (`loadResolver`): the *remaining* store→load forwarding — replace a
       `load` of a slot with the value of a dominating store to it (needs the same aliasing model
       extended forward). Would also recover the CSE-inflated storage-store categories.

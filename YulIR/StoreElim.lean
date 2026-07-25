@@ -10,43 +10,35 @@ is its counterpart for the three memory-like **stores** that Yul emits as value-
 statements — `sstore(key, val)`, `mstore(off, val)` and `tstore(key, val)` — i.e. solc's
 `unusedStoreEliminator` / `equalStoreEliminator` in the *overwritten-store* direction.
 
-## What is removed, and the storage-refund subtlety
+## What is removed
 
-A store `D-store(loc, val)` is a candidate for removal when, on **every** forward path, `loc` is
-overwritten by a later `D`-store to the provably-same location before any operation can **observe
-domain `D`** (no read of `D`, no call/create/… that could observe it). Removing it leaves the final
-`D`-contents unchanged. The catch is **EVM storage gas refunds**: for *storage* (and only storage),
-the intermediate value written is observable through `SSTORE`'s refund accounting, which depends on
-the `(original, current, new)` value transitions of the slot — so dropping an overwritten `sstore`
-whose value *differs* from the one that overwrites it changes the transaction's refund, and hence
-observable gas. (See `equalStoreEliminator/value_change.yul` in Solidity's corpus, marked "cannot be
-removed".) The rule is therefore split by domain:
+A store `D-store(loc, val)` is removed when, on **every** forward path, `loc` is overwritten by a
+later `D`-store to the provably-same location before any operation can **observe domain `D`** (no
+read of `D`, no call/create/… that could observe it). The later store makes this one's value
+unobservable, so the final `D`-contents are unchanged and dropping it changes nothing observable.
 
-* **memory** (`mstore`) and **transient** (`tstore`): no refund mechanism exists, so an overwritten
-  store is removed on a **location-only** match. Because the killing store is to the *same* slot,
-  the final contents and — for memory — the active-word count / `msize` (which the round-trip
-  correctness fingerprint samples) are preserved exactly.
-* **storage** (`sstore`): removed only when the overwriting store writes a **provably-equal value**
-  (`equalStoreEliminator`). Collapsing two same-slot, same-value stores separated only by
-  storage-non-observing statements leaves every `(original, current, new)` transition — and thus the
-  refund — identical. Different-value overwrites are kept.
+The source `yul-semantics` is **gas-free**: it does not model gas or the EVM `SSTORE` refund
+counter, so those are not part of the observable *results* this pass must preserve (the differential
+harness likewise ignores the refund — see `YulEvmCompilerTests.SolcDifferential`). Removal is
+therefore uniform across the three domains and independent of the stored *value*; only the location
+must match. Because the killing store is to the *same* slot, final contents and — for memory — the
+active-word count / `msize` (which `yul-semantics` *does* model, and the round-trip fingerprint
+samples) are preserved exactly.
 
 ## Aliasing model (why syntactic equality is sound here)
 
-Two locations/values are treated as equal only when their `Atom`s are syntactically equal *and*
-stable: a literal, or a variable never reassigned anywhere in the program (`mutatedVars`). Running
-after `valueNumber` (which canonicalises constants/copies of *immutable* values) means equal
-syntactic atoms denote equal runtime values; the immutability side-condition rules out
-`sstore(x,a); x := f(); sstore(x,b)`, where the two `x`s are different slots (and likewise for the
-value atom, so `value_change.yul` — whose value `y` is reassigned — is correctly not touched).
+Two locations are treated as equal only when their `Atom`s are syntactically equal *and* stable:
+a literal, or a variable never reassigned anywhere in the program (`mutatedVars`). Running after
+`valueNumber` (which canonicalises constants/copies of *immutable* values) means equal syntactic
+atoms denote equal runtime values; the immutability side-condition rules out
+`sstore(x,a); x := f(); sstore(x,b)`, where the two `x`s are different slots.
 
 ## Analysis
 
-A backward pass mirroring `YulIR.DeadStore`'s liveness, computing per domain the locations known to
-be overwritten-before-observed downstream ("clobbered"); for storage the overwriting *value* is
-tracked too:
+A backward pass mirroring `YulIR.DeadStore`'s liveness, computing per domain the set of locations
+known to be overwritten-before-observed downstream ("clobbered"):
 
-* a kept store to a stable `loc` **adds** it to its domain's clobber set (storage records `(loc,val)`);
+* a kept store to a stable `loc` **adds** `loc` to its domain's clobber set;
 * any op that **reads** a domain (or a call/create/user-call that may observe everything) **clears**
   the relevant set(s) — a downstream reader means an earlier store is observable, hence not dead;
 * a **terminator** (`stop`/`invalid`/`return`/`revert`/`selfdestruct`) resets to the empty clobber
@@ -57,8 +49,8 @@ tracked too:
   store before a loop, or spanning a call boundary, is never assumed dead), so only local overwrites
   inside them are caught.
 
-Only ever removing a *provably overwritten* store (value-equal, for storage), so any imprecision
-costs an opportunity, never correctness.
+Only ever removing a *provably overwritten* store, so any imprecision costs an opportunity, never
+correctness.
 -/
 
 namespace YulIR
@@ -76,37 +68,34 @@ def atomEq (a b : Atom) : Bool := decide (a = b)
 /-- Membership of an atom in a list, by syntactic equality. -/
 def atomMem (a : Atom) (l : List Atom) : Bool := l.any (atomEq a)
 
-/-- Per-domain "clobbered downstream" sets. Storage carries the overwriting *value* alongside the
-slot (removal requires value-equality, to preserve the SSTORE refund); memory and transient carry
-the location only (no refund exists for them). -/
+/-- Per-domain sets of locations known to be overwritten-before-observed downstream. -/
 structure Clob where
-  sClob : List (Atom × Atom) := []   -- (slot, value)
+  sClob : List Atom := []
   tClob : List Atom := []
   mClob : List Atom := []
 
 /-- Nothing known to be clobbered (the safe/empty state). -/
 def Clob.empty : Clob := {}
 
-/-- Is `(loc, val)` a redundant *storage* store — a downstream same-slot store of an equal value? -/
-def Clob.hasStorage (c : Clob) (loc val : Atom) : Bool :=
-  c.sClob.any (fun p => atomEq p.1 loc && atomEq p.2 val)
+/-- Read the clobber set for a domain. -/
+def Clob.get : Clob → Dom → List Atom
+  | c, .storage   => c.sClob
+  | c, .transient => c.tClob
+  | c, .memory    => c.mClob
 
-/-- Is `loc` clobbered in transient/memory (location-only)? -/
-def Clob.hasLoc (c : Clob) : Dom → Atom → Bool
-  | .transient, loc => atomMem loc c.tClob
-  | .memory,    loc => atomMem loc c.mClob
-  | .storage,   _   => false      -- storage uses `hasStorage`
+/-- Is `loc` known clobbered in domain `d`? -/
+def Clob.has (c : Clob) (d : Dom) (loc : Atom) : Bool := atomMem loc (c.get d)
 
-/-- Record a kept store as clobbering its slot for statements before it. -/
-def Clob.add (c : Clob) : Dom → Atom → Atom → Clob
-  | .storage,   loc, val => { c with sClob := (loc, val) :: c.sClob }
-  | .transient, loc, _   => { c with tClob := loc :: c.tClob }
-  | .memory,    loc, _   => { c with mClob := loc :: c.mClob }
+/-- Record `loc` as clobbered in domain `d`. -/
+def Clob.add (c : Clob) (d : Dom) (loc : Atom) : Clob :=
+  match d with
+  | .storage   => { c with sClob := loc :: c.sClob }
+  | .transient => { c with tClob := loc :: c.tClob }
+  | .memory    => { c with mClob := loc :: c.mClob }
 
-/-- Meet (path intersection): a fact survives only if present on both incoming paths. Storage
-requires the same `(slot, value)`; memory/transient the same location. -/
+/-- Meet (path intersection): a slot stays clobbered only if clobbered on both incoming paths. -/
 def Clob.meet (a b : Clob) : Clob :=
-  { sClob := a.sClob.filter (fun p => b.sClob.any (fun q => atomEq p.1 q.1 && atomEq p.2 q.2))
+  { sClob := a.sClob.filter (fun x => atomMem x b.sClob)
     tClob := a.tClob.filter (fun x => atomMem x b.tClob)
     mClob := a.mClob.filter (fun x => atomMem x b.mClob) }
 
@@ -164,35 +153,16 @@ def rhsObs (after : Clob) : Rhs → Clob
   | .builtin op _  => if Op.isHalting op then Clob.empty else applyObs after (opObs op)
 
 /-- Context threaded through the backward pass: the globally-immutable variables (whose `.var`
-atoms are stable locations/values), and the clobber states at the targets of `break`/`continue`. -/
+atoms are stable locations), and the clobber states at the targets of `break`/`continue`. -/
 structure SCtx where
   mutated : List Ident
   brk     : Clob
   cont    : Clob
 
-/-- Is `a` a stable atom — a literal, or a variable never reassigned program-wide? -/
+/-- Is `loc` a stable location? A literal, or a variable never reassigned program-wide. -/
 def SCtx.stable (c : SCtx) : Atom → Bool
   | .lit _ => true
   | .var x => ! c.mutated.contains x
-
-/-- Decide a candidate store: `none` result means "remove it". Also returns the clobber state to
-propagate to statements before it. -/
-def SCtx.storeStep (c : SCtx) (after : Clob) (d : Dom) (op : Op) (loc val : Atom) :
-    Option Stmt × Clob :=
-  let kept := some (.effect (.builtin op [loc, val]))
-  match d with
-  | .storage =>
-      -- refund-safe: remove only when the overwriting store writes an equal value
-      if c.stable loc && c.stable val then
-        if after.hasStorage loc val then (none, after)
-        else (kept, after.add .storage loc val)
-      else (kept, after)                             -- unstable ⇒ can't track this slot/value
-  | _ =>
-      -- memory / transient: location-only overwrite (no refund)
-      if c.stable loc then
-        if after.hasLoc d loc then (none, after)
-        else (kept, after.add d loc val)
-      else (kept, after)
 
 mutual
 /-- Backward transfer for one statement: rewritten statement (or `none` if the store is removed)
@@ -200,7 +170,13 @@ and the clobber state *before* it, given the state `after` it. -/
 partial def storeStmt (c : SCtx) (after : Clob) : Stmt → (Option Stmt × Clob)
   | .effect (.builtin op [loc, val]) =>
       match storeDom op with
-      | some d => c.storeStep after d op loc val
+      | some d =>
+          let stable := c.stable loc
+          if stable && after.has d loc then
+            (none, after)                                   -- overwritten downstream: drop
+          else
+            let after' := if stable then after.add d loc else after
+            (some (.effect (.builtin op [loc, val])), after')
       | none =>
           if Op.isHalting op then (some (.effect (.builtin op [loc, val])), Clob.empty)
           else (some (.effect (.builtin op [loc, val])), applyObs after (opObs op))
