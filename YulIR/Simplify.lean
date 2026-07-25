@@ -10,9 +10,11 @@ or scoping analysis and is sound regardless of variable shadowing/mutation.
 * **Constant folding.** A pure built-in applied to all-literal operands is evaluated by the
   *dialect's own* `stepOp` (the executable semantics), so the folded literal is exactly what
   the program would have computed — folding cannot diverge from the semantics.
-* **Algebraic identities.** A small, conservative set that fires directly on ANF operands
-  (`add(x,0)=x`, `mul(x,1)=x`, `mul(x,0)=0`, `sub(x,x)=0`, `xor(x,x)=0`, shift-by-0, …).
-  Operands are atoms (side-effect-free), so dropping one (e.g. `mul(x,0)→0`) is sound.
+* **Algebraic identities.** Only *operand-returning* identities (`add(x,0)=x`, `mul(x,1)=x`,
+  `sub(x,0)=x`, `or(x,0)=x`, `x|x=x`, `x&x=x`, `xor(x,0)=x`, shift-by-0, `div(x,1)=x`). Identities
+  returning a *constant* while dropping a possibly-unbound operand (`mul(x,0)→0`, `and(x,0)→0`,
+  `sub(x,x)→0`, …) are excluded — the proof (`YulIR.SimplifySound`) showed they change behaviour
+  in the stuck case (they skip evaluating the dropped operand). See `simplifyIdentity`.
 
 This maps to Solidity's `expressionSimplifier` / `constantOptimiser` steps. It does *not*
 propagate constants across `let`s (that needs value tracking, a later pass), so on ANF it
@@ -44,25 +46,29 @@ def evalConst (op : Op) (lits : List YulSemantics.Literal) : Option YulSemantics
   | some (.ok [r] _) => some (.number r.toNat)
   | _ => none
 
-private def zero : Atom := .lit (.number 0)
 
-/-- Conservative algebraic identities on a pure built-in with atom operands. -/
+/-- Conservative algebraic identities on a pure built-in with atom operands.
+
+Only **operand-returning** identities are included: each rewrites `op(a,b)` to one of its
+operands, dropping only a *literal* operand. Identities that return a *constant* while dropping
+a (possibly-variable) operand — `mul(x,0)→0`, `and(x,0)→0`, `div(x,0)→0`, `sub(x,x)→0`,
+`xor(x,x)→0`, shift-value-by-0 — are deliberately **excluded**: they skip evaluating an operand
+that could be stuck (unbound), so they are unsound against the interpreter (a proof-driven
+restriction; see `YulIR.SimplifySound`). -/
 def simplifyIdentity (op : Op) (args : List Atom) (orig : Rhs) : Rhs :=
   let z (a : Atom) : Bool := a.isLitVal 0
   let o (a : Atom) : Bool := a.isLitVal 1
   match op, args with
   | .add, [a, b] => if z a then .atom b else if z b then .atom a else orig
-  | .sub, [a, b] => if z b then .atom a else if a == b then .atom zero else orig
-  | .mul, [a, b] =>
-      if z a || z b then .atom zero
-      else if o a then .atom b else if o b then .atom a else orig
-  | .div, [a, b] => if z b then .atom zero else if o b then .atom a else orig
+  | .sub, [a, b] => if z b then .atom a else orig
+  | .mul, [a, b] => if o a then .atom b else if o b then .atom a else orig
+  | .div, [a, b] => if o b then .atom a else orig
   | .or,  [a, b] => if z a then .atom b else if z b then .atom a else if a == b then .atom a else orig
-  | .and, [a, b] => if z a || z b then .atom zero else if a == b then .atom a else orig
-  | .xor, [a, b] => if z a then .atom b else if z b then .atom a else if a == b then .atom zero else orig
-  | .shl, [a, b] => if z a then .atom b else if z b then .atom zero else orig
-  | .shr, [a, b] => if z a then .atom b else if z b then .atom zero else orig
-  | .sar, [a, b] => if z a then .atom b else if z b then .atom zero else orig
+  | .and, [a, b] => if a == b then .atom a else orig
+  | .xor, [a, b] => if z a then .atom b else if z b then .atom a else orig
+  | .shl, [a, b] => if z a then .atom b else orig
+  | .shr, [a, b] => if z a then .atom b else orig
+  | .sar, [a, b] => if z a then .atom b else orig
   | _, _ => orig
 
 /-- Simplify one right-hand side: fold pure literal ops, else apply identities. Impure
