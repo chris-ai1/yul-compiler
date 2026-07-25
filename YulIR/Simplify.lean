@@ -99,7 +99,7 @@ def szStmt : Stmt → Nat
 /-- Structural size of an optional block (a `switch` default). -/
 def szBlockOpt : Option (List Stmt) → Nat
   | none   => 0
-  | some b => szBlock b
+  | some b => 1 + szBlock b
 /-- Structural size of a block. -/
 def szBlock : List Stmt → Nat
   | []      => 0
@@ -120,15 +120,13 @@ def simplifyStmt (s : Stmt) : Stmt :=
   | .assign vars rhs   => .assign vars (simplifyRhs rhs)
   | .effect rhs        => .effect (simplifyRhs rhs)
   | .cond c body       => .cond c (simplifyBlock body)
-  | .switch c cases d  =>
-      .switch c (simplifyCases cases)
-        (match d with | none => none | some body => some (simplifyBlock body))
+  | .switch c cases d  => .switch c (simplifyCases cases) (simplifyDefault d)
   | .loop post body    => .loop (simplifyBlock post) (simplifyBlock body)
   | .«break»           => .«break»
   | .«continue»        => .«continue»
   | .leave             => .leave
   termination_by szStmt s
-  decreasing_by all_goals (simp only [szStmt, szBlockOpt]; omega)
+  decreasing_by all_goals (simp only [szStmt]; omega)
 
 /-- Simplify every statement in a block. -/
 def simplifyBlock (b : List Stmt) : List Stmt :=
@@ -145,6 +143,14 @@ def simplifyCases (cases : List (Literal × List Stmt)) : List (Literal × List 
   | (l, b) :: ss  => (l, simplifyBlock b) :: simplifyCases ss
   termination_by szCases cases
   decreasing_by all_goals (simp only [szCases]; omega)
+
+/-- Simplify a `switch`'s optional default block. -/
+def simplifyDefault (d : Option (List Stmt)) : Option (List Stmt) :=
+  match d with
+  | none   => none
+  | some b => some (simplifyBlock b)
+  termination_by szBlockOpt d
+  decreasing_by all_goals (simp only [szBlockOpt]; omega)
 end
 
 end YulIR
