@@ -25,6 +25,7 @@ namespace YulIR
 
 open YulSemantics.EVM (litValue stepOp)
 open YulSemantics.EVM
+open YulSemantics (Literal)
 
 /-- The literal value of an atom, if it is a literal. -/
 def Atom.lit? : Atom → Option YulSemantics.Literal
@@ -86,6 +87,30 @@ def simplifyRhs : Rhs → Rhs
         | none => simplifyIdentity op args orig
 
 mutual
+/-- Structural size of a statement (a hand-written measure so `simplify`'s termination goals
+avoid the auto-`sizeOf` instance mismatch on the nested `List (Literal × List Stmt)`). -/
+def szStmt : Stmt → Nat
+  | .block b        => 1 + szBlock b
+  | .funDef _ _ _ b => 1 + szBlock b
+  | .cond _ b       => 1 + szBlock b
+  | .switch _ cs d  => 1 + szCases cs + szBlockOpt d
+  | .loop p b       => 1 + szBlock p + szBlock b
+  | _               => 1
+/-- Structural size of an optional block (a `switch` default). -/
+def szBlockOpt : Option (List Stmt) → Nat
+  | none   => 0
+  | some b => szBlock b
+/-- Structural size of a block. -/
+def szBlock : List Stmt → Nat
+  | []      => 0
+  | s :: ss => 1 + szStmt s + szBlock ss
+/-- Structural size of a `switch`'s case list. -/
+def szCases : List (Literal × List Stmt) → Nat
+  | []           => 0
+  | (_, b) :: ss => 1 + szBlock b + szCases ss
+end
+
+mutual
 /-- Apply `simplifyRhs` to every right-hand side in a statement, recursively. -/
 def simplifyStmt (s : Stmt) : Stmt :=
   match s with
@@ -96,23 +121,30 @@ def simplifyStmt (s : Stmt) : Stmt :=
   | .effect rhs        => .effect (simplifyRhs rhs)
   | .cond c body       => .cond c (simplifyBlock body)
   | .switch c cases d  =>
-      -- NOTE: `switch` case *bodies* are intentionally left untouched so this pass stays a clean
-      -- `List Stmt`-only structural recursion, provable without pair-list termination machinery.
-      -- (Minor completeness gap; the default branch is still simplified.) TODO: revisit.
-      .switch c cases (match d with | none => none | some body => some (simplifyBlock body))
+      .switch c (simplifyCases cases)
+        (match d with | none => none | some body => some (simplifyBlock body))
   | .loop post body    => .loop (simplifyBlock post) (simplifyBlock body)
   | .«break»           => .«break»
   | .«continue»        => .«continue»
   | .leave             => .leave
-  termination_by 2 * sizeOf s + 1
-  decreasing_by all_goals simp_wf <;> omega
+  termination_by szStmt s
+  decreasing_by all_goals (simp only [szStmt, szBlockOpt]; omega)
 
 /-- Simplify every statement in a block. -/
 def simplifyBlock (b : List Stmt) : List Stmt :=
   match b with
   | []      => []
   | s :: ss => simplifyStmt s :: simplifyBlock ss
-  termination_by 2 * sizeOf b
+  termination_by szBlock b
+  decreasing_by all_goals (simp only [szBlock]; omega)
+
+/-- Simplify every `switch` case body. -/
+def simplifyCases (cases : List (Literal × List Stmt)) : List (Literal × List Stmt) :=
+  match cases with
+  | []            => []
+  | (l, b) :: ss  => (l, simplifyBlock b) :: simplifyCases ss
+  termination_by szCases cases
+  decreasing_by all_goals (simp only [szCases]; omega)
 end
 
 end YulIR
