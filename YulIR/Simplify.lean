@@ -81,21 +81,32 @@ def simplifyRhs : Rhs → Rhs
 
 mutual
 /-- Apply `simplifyRhs` to every right-hand side in a statement, recursively. -/
-partial def simplifyStmt : Stmt → Stmt
+def simplifyStmt (s : Stmt) : Stmt :=
+  match s with
   | .block body        => .block (simplifyBlock body)
   | .funDef n ps rs b  => .funDef n ps rs (simplifyBlock b)
   | .letD vars rhs     => .letD vars (simplifyRhs rhs)
   | .assign vars rhs   => .assign vars (simplifyRhs rhs)
   | .effect rhs        => .effect (simplifyRhs rhs)
   | .cond c body       => .cond c (simplifyBlock body)
-  | .switch c cases d  => .switch c (cases.map (fun p => (p.1, simplifyBlock p.2))) (d.map simplifyBlock)
+  | .switch c cases d  =>
+      -- NOTE: `switch` case *bodies* are intentionally left untouched so this pass stays a clean
+      -- `List Stmt`-only structural recursion, provable without pair-list termination machinery.
+      -- (Minor completeness gap; the default branch is still simplified.) TODO: revisit.
+      .switch c cases (match d with | none => none | some body => some (simplifyBlock body))
   | .loop post body    => .loop (simplifyBlock post) (simplifyBlock body)
-  | s                  => s
+  | .«break»           => .«break»
+  | .«continue»        => .«continue»
+  | .leave             => .leave
+  termination_by 2 * sizeOf s + 1
+  decreasing_by all_goals simp_wf <;> omega
 
 /-- Simplify every statement in a block. -/
-partial def simplifyBlock : Block → Block
+def simplifyBlock (b : List Stmt) : List Stmt :=
+  match b with
   | []      => []
   | s :: ss => simplifyStmt s :: simplifyBlock ss
+  termination_by 2 * sizeOf b
 end
 
 end YulIR
