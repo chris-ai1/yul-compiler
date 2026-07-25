@@ -237,14 +237,8 @@ def corpus : List (String × YulSemantics.Block EVM.Op) :=
         x := add(x, 1)
       }
       sstore(0, x) })
-  -- store-elimination targets: an overwritten sstore/mstore/tstore is dead
-  , ("storeElim/storage-overwrite", yul% {
-      sstore(0, calldataload(0))
-      sstore(0, calldataload(32)) })
-  , ("storeElim/storage-triple", yul% {
-      sstore(3, calldataload(0))
-      sstore(3, calldataload(32))
-      sstore(3, calldataload(64)) })
+  -- store-elimination targets: memory/transient overwrites are removed by location;
+  -- storage overwrites only when the overwriting value is provably equal (refund-safe).
   , ("storeElim/mem-overwrite", yul% {
       mstore(64, calldataload(0))
       mstore(64, calldataload(32))
@@ -253,26 +247,42 @@ def corpus : List (String × YulSemantics.Block EVM.Op) :=
       tstore(7, calldataload(0))
       tstore(7, calldataload(32))
       sstore(0, tload(7)) })
-  -- store-elimination must NOT fire when the value is observable
-  , ("storeElim/keep-read-between", yul% {
+  , ("storeElim/storage-equal", yul% {
+      sstore(3, 7)
+      sstore(3, 7) })
+  -- storage overwrites with DIFFERENT values must NOT be removed: dropping the earlier
+  -- store changes the SSTORE gas refund (an observable difference).
+  , ("storeElim/storage-diff-kept", yul% {
       sstore(0, calldataload(0))
-      let z := sload(0)
       sstore(0, calldataload(32))
+      sstore(9, sload(0)) })
+  , ("storeElim/value-change", yul% {
+      let x := calldataload(0)
+      let y := calldataload(32)
+      sstore(x, y)
+      y := calldataload(64)
+      sstore(x, y) })
+  -- store-elimination must NOT fire when the value is observable in between
+  , ("storeElim/keep-read-between", yul% {
+      mstore(64, calldataload(0))
+      let z := mload(64)
+      mstore(64, calldataload(32))
       sstore(1, z) })
   , ("storeElim/keep-conditional", yul% {
-      sstore(0, 1)
-      if calldataload(0) { sstore(0, 2) }
-      sstore(1, sload(0)) })
+      mstore(64, 1)
+      if calldataload(0) { mstore(64, 2) }
+      sstore(1, mload(64)) })
   , ("storeElim/keep-mutated-key", yul% {
       let k := calldataload(0)
-      sstore(k, 1)
+      mstore(k, 1)
       k := calldataload(32)
-      sstore(k, 2)
-      sstore(100, sload(0)) })
+      mstore(k, 2)
+      sstore(100, mload(0)) })
   , ("storeElim/keep-before-terminator", yul% {
-      sstore(0, calldataload(0))
-      if calldataload(32) { return(0, 0) }
-      sstore(0, calldataload(64)) })
+      mstore(0, calldataload(0))
+      if calldataload(32) { return(0, 32) }
+      mstore(0, calldataload(64))
+      sstore(0, mload(0)) })
   , ("storeElim/mem-keep-across-keccak", yul% {
       mstore(0, calldataload(0))
       let h := keccak256(0, 32)
