@@ -47,6 +47,21 @@ def compileWithSolc (solcPath source : String) : IO (Except String ByteArray) :=
     return .error s!"solc compilation failed: {output.stderr.trimAscii.copy}"
   return parseSolcBinary output.stdout
 
+/-- Compile one strict-assembly Yul source with `solc`'s **Yul optimizer ON**
+(`--strict-assembly --optimize`), pinned to the same Osaka target, and return the
+emitted bytecode. This is the reference for measuring a *Yul optimizer* against
+solc's: both sides start from the identical Yul program, so the bytecode
+difference is purely optimizer-vs-optimizer (and backend codegen), unlike
+`compileWithSolc`, which leaves solc's optimizer OFF (backend-codegen parity). -/
+def compileOptimizedWithSolc (solcPath source : String) : IO (Except String ByteArray) := do
+  let output ← IO.Process.output {
+    cmd := solcPath
+    args := #["--strict-assembly", "--optimize", "--bin", "--evm-version", "osaka", "-"]
+  } (some source)
+  if output.exitCode != 0 then
+    return .error s!"solc --optimize compilation failed: {output.stderr.trimAscii.copy}"
+  return parseSolcBinary output.stdout
+
 /-- Fully *unoptimized* Yul IR for a Solidity source (`--ir`, solc's `--via-ir`
 lowering with the Yul optimizer OFF). Returned from the first `object` line so
 it can be fed straight to this compiler. Using the unoptimized IR means the

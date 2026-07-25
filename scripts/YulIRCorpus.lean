@@ -1,6 +1,7 @@
 import YulIR.Check
 import YulParser.Compile
 import YulEvmCompilerTests.SolidityCorpus
+import YulEvmCompilerTests.Solc
 
 /-!
 # scripts/YulIRCorpus — IR benchmark over Solidity's `yulOptimizerTests`
@@ -17,8 +18,16 @@ and compares compiled **code size** three ways:
 vs `current` is the headline gap to the mature Yul optimizer. As passes land in `YulIR.optimize`
 the `ir-opt` column drops.
 
+The `gas` subcommand instead measures **executed EVM gas against solc's actual Yul optimizer**
+(`solc --strict-assembly --optimize`), the true optimization target — not just the in-repo
+optimizer. Both this repo's output and solc's are compiled from the identical Yul program and
+executed in the EVM; gas is summed only over scenarios where the two halt with identical
+observable state. See `gasReport`.
+
 Usage:
   lake env lean --run scripts/YulIRCorpus.lean report <corpusDir>
+  lake env lean --run scripts/YulIRCorpus.lean behaviour <corpusDir>
+  lake env lean --run scripts/YulIRCorpus.lean gas    <corpusDir> <solc-path> <solc-version>
   lake env lean --run scripts/YulIRCorpus.lean update <corpusDir> <baselineFile>
   lake env lean --run scripts/YulIRCorpus.lean check  <corpusDir> <baselineFile>
 
@@ -31,6 +40,7 @@ reported.
 open System YulParser
 open YulEvmCompilerTests.SolidityCorpus
 open YulEvmCompilerTests.SolcDifferential (compareBytecode measureGas fixtureSeed)
+open YulEvmCompilerTests.Solc (compileOptimizedWithSolc checkSolcVersion)
 
 namespace YulIRCorpus
 
@@ -153,25 +163,84 @@ def behaviour (corpusDir : FilePath) : IO UInt32 := do
   IO.println s!"YulIR behaviour: {ok} match current, {mism} MISMATCH, {timeout} step-cap/gas-bound, {uncmp} uncompilable."
   return (if mism == 0 then 0 else 1)
 
-/-- Gas comparison: total EVM execution gas of the IR-optimized code vs the current pipeline,
-summed over every gas-comparable (both halt identically) scenario across the corpus. This is the
-metric solc's optimizer actually targets, and where CSE/inlining pay off even when they cost code
-size. Measurement only — cannot affect correctness. -/
-def gasReport (corpusDir : FilePath) : IO UInt32 := do
+/-- A signed permyriad (basis-points, ‱ = parts per 10,000) of `x` relative to `base`,
+rendered as a percent with two decimals, e.g. `+1.23%`. `base = 0` renders `n/a`. -/
+def pctVs (x base : Nat) : String :=
+  if base == 0 then "n/a" else
+    let bp := (Int.ofNat x - Int.ofNat base) * 10000 / Int.ofNat base   -- signed basis points
+    let sign := if bp < 0 then "-" else "+"
+    let a := bp.natAbs
+    s!"{sign}{a / 100}.{padTwo (a % 100)}%"
+where padTwo (n : Nat) : String := if n < 10 then s!"0{n}" else s!"{n}"
+
+/-- Gas comparison against **solc's own Yul optimizer** — the true target.
+
+For each block fixture we compile the *same* Yul three ways and execute each in the EVM
+under the differential scenarios:
+
+* `ir-opt` — this repo's experimental IR optimizer: `ofYul → YulIR.optimize → toYul → backend`;
+* `current` — the in-repo production optimizer (`compileSource`), kept for reference;
+* `solc`  — `solc --strict-assembly --optimize` (solc's Yul optimizer), via `compileWith…`.
+
+`measureGas` only counts a scenario when both bytecodes halt with identical observable state,
+so gas is compared solely where behaviour matches. The headline is **[ir-opt vs solc]** over
+every scenario where our optimized code and solc's agree; a stricter **[three-way]** total sums
+only scenarios where `ir-opt`, `current`, and `solc` *all* agree, so the two ratios (ir-opt/solc,
+current/solc) are on an identical scenario set. Measurement only — cannot affect correctness.
+
+Fixtures solc rejects, or that either pipeline cannot compile, are counted and reported (never
+silently dropped). -/
+def gasReport (corpusDir : FilePath) (solcPath expectedVersion : String) : IO UInt32 := do
+  match ← checkSolcVersion solcPath expectedVersion with
+  | .error message => IO.eprintln message; return 1
+  | .ok () => pure ()
   let fixtures ← blockFixtures corpusDir
-  let mut irTot := 0; let mut curTot := 0; let mut n := 0; let mut wins := 0; let mut losses := 0
+  -- Two-way [ir-opt vs solc] accumulators (broadest comparable set).
+  let mut irTot := 0; let mut solcTot := 0; let mut n2 := 0
+  let mut wins := 0; let mut losses := 0
+  -- Strict [three-way] accumulators: scenarios where ir-opt, current, and solc all agree.
+  let mut ir3 := 0; let mut cur3 := 0; let mut solc3 := 0; let mut n3 := 0
+  -- Coverage bookkeeping — reported, never silently truncated.
+  let mut compiled := 0                    -- fixtures where all three produced bytecode
+  let mut solcRejected : Array String := #[]
+  let mut irFailed : Array String := #[]
+  let mut curFailed : Array String := #[]
   for (name, source, b) in fixtures do
-    match compileSource source, YulIR.Check.blockBytecode (YulIR.Check.irOptimized b) with
-    | some cur, some irOp =>
-        for (_, res) in measureGas irOp cur (scenarioSeed := fixtureSeed name) do
-          match res with
-          | some (gi, gc) =>
-              irTot := irTot + gi; curTot := curTot + gc; n := n + 1
-              if gi < gc then wins := wins + 1 else if gi > gc then losses := losses + 1
+    let irOpt := YulIR.Check.blockBytecode (YulIR.Check.irOptimized b)
+    let cur := compileSource source
+    let solc ← compileOptimizedWithSolc solcPath source
+    match irOpt, cur, solc with
+    | some irOp, some curB, .ok solcB =>
+        compiled := compiled + 1
+        let seed := fixtureSeed name
+        let mIr := measureGas irOp solcB (scenarioSeed := seed)   -- (ir gas, solc gas) per scenario
+        let mCur := measureGas curB solcB (scenarioSeed := seed)  -- (cur gas, solc gas) per scenario
+        for i in [0:mIr.size] do
+          match mIr[i]!.2 with
+          | some (gi, gs) =>
+              irTot := irTot + gi; solcTot := solcTot + gs; n2 := n2 + 1
+              if gi < gs then wins := wins + 1 else if gi > gs then losses := losses + 1
+              -- Three-way: additionally require current to agree with solc on this scenario.
+              match mCur[i]!.2 with
+              | some (gc, _) =>
+                  ir3 := ir3 + gi; cur3 := cur3 + gc; solc3 := solc3 + gs; n3 := n3 + 1
+              | none => pure ()
           | none => pure ()
-    | _, _ => pure ()
-  IO.println s!"YulIR gas over {n} comparable scenarios: ir-opt={irTot}  current={curTot}  Δ={Int.ofNat irTot - Int.ofNat curTot}"
-  IO.println s!"  per-scenario: ir-opt cheaper in {wins}, costlier in {losses}, equal in {n - wins - losses}"
+    | _, _, .ok _   => if irOpt.isNone then irFailed := irFailed.push name
+                       if cur.isNone then curFailed := curFailed.push name
+    | _, _, .error e => solcRejected := solcRejected.push s!"{name}: {e}"
+  IO.println s!"YulIR gas vs solc's Yul optimizer (solc --strict-assembly --optimize), over {corpusDir}:"
+  IO.println s!"  {compiled}/{fixtures.size} block fixtures compiled by ir-opt, current, and solc"
+  IO.println s!"  dropped: solc rejected {solcRejected.size}, ir-opt uncompilable {irFailed.size}, current uncompilable {curFailed.size}"
+  IO.println s!"  [ir-opt vs solc]  over {n2} comparable scenarios: ir-opt={irTot}  solc={solcTot}  ir-opt/solc={pctVs irTot solcTot}"
+  IO.println s!"    per-scenario vs solc: ir-opt cheaper in {wins}, costlier in {losses}, equal in {n2 - wins - losses}"
+  IO.println s!"  [three-way]       over {n3} scenarios where ir-opt, current, and solc all agree:"
+  IO.println s!"    ir-opt={ir3}  current={cur3}  solc={solc3}  |  ir-opt/solc={pctVs ir3 solc3}  current/solc={pctVs cur3 solc3}"
+  -- Machine-readable aggregate, matching CheckSolidityGas' `mode=vs_solc_optimized` schema.
+  IO.println s!"Gas totals: suite=yulir-optimizer mode=vs_solc_optimized ours={irTot} solc={solcTot} comparable={n2}"
+  for name in solcRejected do IO.eprintln s!"  solc rejected {name}"
+  for name in irFailed do IO.eprintln s!"  ir-opt uncompilable: {name}"
+  for name in curFailed do IO.eprintln s!"  current uncompilable: {name}"
   return 0
 
 end YulIRCorpus
@@ -186,7 +255,7 @@ def main (args : List String) : IO UInt32 := do
       return 0
   | ["behaviour", dir] => behaviour dir
   | ["behavior", dir] => behaviour dir
-  | ["gas", dir] => gasReport dir
+  | ["gas", dir, solcPath, expectedVersion] => gasReport dir solcPath expectedVersion
   | ["update", dir, baseline] => do
       let (m, skipped) ← scan dir
       IO.FS.writeFile baseline (render m)
@@ -222,5 +291,7 @@ def main (args : List String) : IO UInt32 := do
       IO.println s!"YulIR corpus check: gated {gated} categories, {drifted} drifted/new, {regressions} regressions."
       return (if regressions == 0 then 0 else 1)
   | _ => do
-      IO.eprintln "usage: YulIRCorpus (report <dir> | update <dir> <baseline> | check <dir> <baseline>)"
+      IO.eprintln ("usage: YulIRCorpus (report <dir> | behaviour <dir> | " ++
+        "gas <dir> <solc-path> <expected-solc-version> | " ++
+        "update <dir> <baseline> | check <dir> <baseline>)")
       return 2
