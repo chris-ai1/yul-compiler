@@ -69,6 +69,12 @@ Order: `uniquify` → (`valueNumber` → `structural` → `deadStore` → `deadC
 - **Behaviour sweep** (local, slow): `scripts/YulIRCorpus.lean behaviour <dir>` — IR-opt
   vs current bytecode over the whole corpus (`compareBytecode`). Step-cap/gas-bound diffs are
   classified separately from real observable divergences.
+- **Gas vs solc's optimizer** (local, slow): `scripts/YulIRCorpus.lean gas <dir> <solc> <ver>` —
+  compiles each block fixture three ways from the *identical* Yul (`ir-opt`, `current`, and
+  `solc --strict-assembly --optimize`), executes all three in the EVM, and sums gas over the
+  scenarios where they halt with identical observable state. This measures the IR optimizer
+  against **solc's actual Yul optimizer** — the true target — not merely the in-repo optimizer.
+  Reports both `[ir-opt vs solc]` and a strict three-way total on an identical scenario set.
 
 Run in the interpreter (`lake env lean --run …`); a native `lean_exe` would be faster at
 runtime but requires compiling the whole mathlib closure with the C backend (~13 min), so it
@@ -76,10 +82,20 @@ is reserved for CI-cached heavy runs, not local iteration.
 
 ## Status & roadmap toward parity
 
-Current, on Solidity's `yulOptimizerTests`:
+Current, on Solidity's `yulOptimizerTests` (solc 0.8.35, `--evm-version osaka`; corpus
+`argotorg/solidity` develop @ 96bdc548):
 
-* **Gas ≈ parity**: total EVM execution gas `ir-opt` 1,203,801,947 vs `current` 1,203,697,922
-  (**+0.009%**) — the metric solc's optimizer actually targets (`scripts/YulIRCorpus.lean gas`).
+* **Gas ≈ parity with solc's Yul optimizer**: total EVM execution gas, summed over the 2,770
+  scenarios (607/636 block fixtures) where `ir-opt` and `solc --strict-assembly --optimize` halt
+  identically, is `ir-opt` 1,200,216,276 vs `solc` 1,200,204,507 — **+0.001%** (+11,769 gas).
+  For reference the in-repo `current` optimizer is `1,200,120,698` on that same set, **−0.007%**
+  vs solc; so `ir-opt` is **+0.008%** vs `current`. This is now measured against **solc's actual
+  optimizer** (`scripts/YulIRCorpus.lean gas`), not just the in-repo baseline.
+  * *Caveat:* the aggregate is dominated by a handful of very high-gas loop fixtures where all
+    three do essentially identical work. Per scenario, `ir-opt` is cheaper than solc in 85,
+    costlier in 2,319, equal in 366 — i.e. usually a few gas above solc, with the total pulled to
+    parity by the big-gas fixtures. Dropped (logged, never silent): 1 solc-rejected `verbatim`,
+    28 `ir-opt`-uncompilable and 26 `current`-uncompilable fixtures (mostly `verbatim`).
 * **Code size within ~1.2%**: `ir-opt` 221,001 vs `current` 218,372 (**−9%** vs `ir-noopt` 240,892);
   several categories *beat* `current` (`structuralSimplifier`, `deadCodeEliminator`,
   `unusedAssignEliminator`, `unusedPruner`, `fullSuite`).
