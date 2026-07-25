@@ -63,8 +63,8 @@ def simplifyIdentity (op : Op) (args : List Atom) (orig : Rhs) : Rhs :=
   | .sub, [a, b] => if z b then .atom a else orig
   | .mul, [a, b] => if o a then .atom b else if o b then .atom a else orig
   | .div, [a, b] => if o b then .atom a else orig
-  | .or,  [a, b] => if z a then .atom b else if z b then .atom a else if a == b then .atom a else orig
-  | .and, [a, b] => if a == b then .atom a else orig
+  | .or,  [a, b] => if z a then .atom b else if z b then .atom a else if a = b then .atom a else orig
+  | .and, [a, b] => if a = b then .atom a else orig
   | .xor, [a, b] => if z a then .atom b else if z b then .atom a else orig
   | .shl, [a, b] => if z a then .atom b else orig
   | .shr, [a, b] => if z a then .atom b else orig

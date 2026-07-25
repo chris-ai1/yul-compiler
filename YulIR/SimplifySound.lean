@@ -85,4 +85,58 @@ theorem evalConst_fold_sound (fuel : Nat) (funs : FEnv) (env : VEnv) (st : EvmSt
     simp [litValue_number_toNat]
   · simp at hc
 
+/-- Evaluating a two-argument `bin`-shaped built-in. -/
+theorem evalRhs_bin {op : Op} {f : U256 → U256 → U256}
+    (hop : ∀ vals st', stepOp op vals st' = bin f vals st')
+    (fuel : Nat) (funs : FEnv) (env : VEnv) (st : EvmState) (a b : Atom) :
+    evalRhs fuel funs env st (.builtin op [a, b])
+      = (match evalAtom env a, evalAtom env b with
+         | some av, some bv => Result.ok (.vals [f av bv] st)
+         | _, _ => Result.stuck) := by
+  cases ha : evalAtom env a <;> cases hb : evalAtom env b <;>
+    simp_all [evalRhs, evalAtoms, List.mapM, List.mapM.loop, hop, bin]
+
+/-- An atom that is a literal of value `n` evaluates to that value. -/
+theorem isLitVal_eval {env : VEnv} {a : Atom} {n : Nat} (h : Atom.isLitVal a n = true) :
+    evalAtom env a = some (BitVec.ofNat 256 n) := by
+  unfold Atom.isLitVal at h
+  split at h
+  · rename_i l; simp only [beq_iff_eq] at h; simp [evalAtom, h]
+  · exact absurd h (by simp)
+
+/-- Identity dropping a left literal-`k` operand (`f k v = v`). -/
+theorem idL {op : Op} {f} (hop : ∀ vals st', stepOp op vals st' = bin f vals st')
+    {a : Atom} {k : U256} (fuel funs env st) (ha : evalAtom env a = some k)
+    (hf : ∀ v, f k v = v) (b : Atom) :
+    evalRhs fuel funs env st (.builtin op [a, b]) = evalRhs fuel funs env st (.atom b) := by
+  rw [evalRhs_bin hop]; simp only [evalRhs, ha]; cases evalAtom env b <;> simp_all [hf]
+
+/-- Identity dropping a right literal-`k` operand (`f v k = v`). -/
+theorem idR {op : Op} {f} (hop : ∀ vals st', stepOp op vals st' = bin f vals st')
+    {b : Atom} {k : U256} (fuel funs env st) (hb : evalAtom env b = some k)
+    (hf : ∀ v, f v k = v) (a : Atom) :
+    evalRhs fuel funs env st (.builtin op [a, b]) = evalRhs fuel funs env st (.atom a) := by
+  rw [evalRhs_bin hop]; simp only [evalRhs, hb]; cases evalAtom env a <;> simp_all [hf]
+
+/-- Idempotent identity (`f v v = v`) on repeated operand. -/
+theorem idSelf {op : Op} {f} (hop : ∀ vals st', stepOp op vals st' = bin f vals st')
+    (fuel funs env st) (hf : ∀ v, f v v = v) (a : Atom) :
+    evalRhs fuel funs env st (.builtin op [a, a]) = evalRhs fuel funs env st (.atom a) := by
+  rw [evalRhs_bin hop]; simp only [evalRhs]; cases evalAtom env a <;> simp_all [hf]
+
+/-- Worked instances confirming the operand-returning identities are sound (each is a direct
+application of `idL`/`idR`/`idSelf`); the general `simplifyIdentity_eval` dispatcher over all ops
+is the remaining mile. -/
+example (fuel funs env st) (a b : Atom) (h : Atom.isLitVal a 0 = true) :
+    evalRhs fuel funs env st (.builtin Op.add [a, b]) = evalRhs fuel funs env st (.atom b) :=
+  idL (by intro vals st'; rfl) fuel funs env st (isLitVal_eval h) (by intro v; bv_decide) b
+
+example (fuel funs env st) (a b : Atom) (h : Atom.isLitVal b 1 = true) :
+    evalRhs fuel funs env st (.builtin Op.mul [a, b]) = evalRhs fuel funs env st (.atom a) :=
+  idR (by intro vals st'; rfl) fuel funs env st (isLitVal_eval h) (by intro v; bv_decide) a
+
+example (fuel funs env st) (a : Atom) :
+    evalRhs fuel funs env st (.builtin Op.and [a, a]) = evalRhs fuel funs env st (.atom a) :=
+  idSelf (by intro vals st'; rfl) fuel funs env st (by intro v; bv_decide) a
+
 end YulIR
