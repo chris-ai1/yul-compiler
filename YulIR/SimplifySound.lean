@@ -124,19 +124,95 @@ theorem idSelf {op : Op} {f} (hop : ∀ vals st', stepOp op vals st' = bin f val
     evalRhs fuel funs env st (.builtin op [a, a]) = evalRhs fuel funs env st (.atom a) := by
   rw [evalRhs_bin hop]; simp only [evalRhs]; cases evalAtom env a <;> simp_all [hf]
 
-/-- Worked instances confirming the operand-returning identities are sound (each is a direct
-application of `idL`/`idR`/`idSelf`); the general `simplifyIdentity_eval` dispatcher over all ops
-is the remaining mile. -/
-example (fuel funs env st) (a b : Atom) (h : Atom.isLitVal a 0 = true) :
-    evalRhs fuel funs env st (.builtin Op.add [a, b]) = evalRhs fuel funs env st (.atom b) :=
-  idL (by intro vals st'; rfl) fuel funs env st (isLitVal_eval h) (by intro v; bv_decide) b
+/-- The operand-returning identities preserve evaluation (dispatcher over all ops). -/
+theorem simplifyIdentity_eval (fuel : Nat) (funs : FEnv) (env : VEnv) (st : EvmState)
+    (op : Op) (args : List Atom) :
+    evalRhs fuel funs env st (simplifyIdentity op args (.builtin op args))
+      = evalRhs fuel funs env st (.builtin op args) := by
+  rcases args with _ | ⟨a, _ | ⟨b, _ | r⟩⟩ <;> try (cases op <;> rfl)
+  -- args = [a, b]; each concrete op fixes `f`, so `bv_decide` sees no metavariable.
+  cases op
+  case add =>
+    simp only [simplifyIdentity]; split_ifs with h1 h2
+    · exact (idL (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; bv_decide) b).symm
+    · exact (idR (fun _ _ => rfl) fuel funs env st (isLitVal_eval h2) (by intro v; bv_decide) a).symm
+    · rfl
+  case sub =>
+    simp only [simplifyIdentity]; split_ifs with h1
+    · exact (idR (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; simp) a).symm
+    · rfl
+  case mul =>
+    simp only [simplifyIdentity]; split_ifs with h1 h2
+    · exact (idL (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; bv_decide) b).symm
+    · exact (idR (fun _ _ => rfl) fuel funs env st (isLitVal_eval h2) (by intro v; bv_decide) a).symm
+    · rfl
+  case div =>
+    simp only [simplifyIdentity]; split_ifs with h1
+    · exact (idR (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; bv_decide) a).symm
+    · rfl
+  case or =>
+    simp only [simplifyIdentity]; split_ifs with h1 h2 h3
+    · exact (idL (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; simp) b).symm
+    · exact (idR (fun _ _ => rfl) fuel funs env st (isLitVal_eval h2) (by intro v; simp) a).symm
+    · subst h3; exact (idSelf (fun _ _ => rfl) fuel funs env st (by intro v; simp) a).symm
+    · rfl
+  case and =>
+    simp only [simplifyIdentity]; split_ifs with h1
+    · subst h1; exact (idSelf (fun _ _ => rfl) fuel funs env st (by intro v; bv_decide) a).symm
+    · rfl
+  case xor =>
+    simp only [simplifyIdentity]; split_ifs with h1 h2
+    · exact (idL (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; bv_decide) b).symm
+    · exact (idR (fun _ _ => rfl) fuel funs env st (isLitVal_eval h2) (by intro v; bv_decide) a).symm
+    · rfl
+  case shl =>
+    simp only [simplifyIdentity]; split_ifs with h1
+    · exact (idL (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; bv_decide) b).symm
+    · rfl
+  case shr =>
+    simp only [simplifyIdentity]; split_ifs with h1
+    · exact (idL (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; bv_decide) b).symm
+    · rfl
+  case sar =>
+    simp only [simplifyIdentity]; split_ifs with h1
+    · exact (idL (fun _ _ => rfl) fuel funs env st (isLitVal_eval h1) (by intro v; bv_decide) b).symm
+    · rfl
+  all_goals rfl
 
-example (fuel funs env st) (a b : Atom) (h : Atom.isLitVal b 1 = true) :
-    evalRhs fuel funs env st (.builtin Op.mul [a, b]) = evalRhs fuel funs env st (.atom a) :=
-  idR (by intro vals st'; rfl) fuel funs env st (isLitVal_eval h) (by intro v; bv_decide) a
+/-- A successful `allLits` means the arguments were exactly those literals. -/
+theorem allLits_eq {args : List Atom} {lits : List Literal} (h : allLits args = some lits) :
+    args = lits.map Atom.lit := by
+  induction args generalizing lits with
+  | nil => simp_all [allLits, List.mapM_nil]
+  | cons x xs ih =>
+      cases x with
+      | var y => simp [allLits, List.mapM_cons, Atom.lit?] at h
+      | lit ll =>
+          simp only [allLits, List.mapM_cons, Atom.lit?] at h
+          cases hxs : xs.mapM Atom.lit? with
+          | none => rw [hxs] at h; simp at h
+          | some rl => rw [hxs] at h; simp at h; subst h; simp [ih hxs]
 
-example (fuel funs env st) (a : Atom) :
-    evalRhs fuel funs env st (.builtin Op.and [a, a]) = evalRhs fuel funs env st (.atom a) :=
-  idSelf (by intro vals st'; rfl) fuel funs env st (by intro v; bv_decide) a
+/-- **Per-rhs soundness.** Simplifying a right-hand side preserves its evaluation. -/
+theorem simplifyRhs_eval (fuel : Nat) (funs : FEnv) (env : VEnv) (st : EvmState) (r : Rhs) :
+    evalRhs fuel funs env st (simplifyRhs r) = evalRhs fuel funs env st r := by
+  cases r with
+  | atom a => rfl
+  | call fn args => rfl
+  | builtin op args =>
+    rw [simplifyRhs]
+    by_cases hp : Op.isPure op = true
+    · simp only [hp, Bool.not_true, Bool.false_eq_true, if_false]
+      cases hal : allLits args with
+      | some lits =>
+          simp only [hal]
+          cases hc : evalConst op lits with
+          | some l =>
+              rw [allLits_eq hal, evalConst_fold_sound fuel funs env st hp hc]
+              simp [evalRhs, evalAtom]
+          | none => exact simplifyIdentity_eval fuel funs env st op args
+      | none => exact simplifyIdentity_eval fuel funs env st op args
+    · simp only [Bool.not_eq_true] at hp
+      simp only [hp, Bool.not_false, if_true]
 
 end YulIR
