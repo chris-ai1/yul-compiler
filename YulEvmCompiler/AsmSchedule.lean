@@ -125,21 +125,32 @@ def schedulable : Asm → Bool
 
 /-! ### Symbolic executor -/
 
-/-- The symbolic state during window execution: the realized stack (top first)
-and the number of input leaves materialized so far (= how deep the window has
-reached below its start). -/
+/-- The symbolic state during window execution: the realized stack (top first),
+the number of input leaves materialized so far (= how deep the window has reached
+below its start), and `opExposed` — the set of input indices that have appeared
+as a DIRECT argument of a pure op. An op requires WORD operands, so a run in
+which `inp i ∈ opExposed` is only well-defined when the concrete value at slot
+`i` is a word (not a `.code` return address); `pop`/`dup`/`swap` are untyped and
+impose no such requirement. This is why the gate demands the candidate's
+`opExposed` be a SUBSET of the original's: the original's successful run witnesses
+that its op-exposed slots are words, and the candidate may only op-touch a
+subset. Without it, `symExec`-equality would wrongly accept e.g. `[pop]` vs
+`[iszero, pop]` (equal net effect symbolically, but the latter is stuck on a
+`.code` value). -/
 structure SymState where
   stack : List Term
   inputs : Nat
+  opExposed : List Nat
 
 /-- Materialize input leaves at the bottom until the realized stack has at least
 `need` elements, so an access at depth `need-1` is in range. Growth increments
-`inputs`. -/
+`inputs`; `opExposed` is unaffected (materialization is not an op use). -/
 def pad (s : SymState) (need : Nat) : SymState :=
   if s.stack.length ≥ need then s
   else
     let extra := need - s.stack.length
-    { stack := s.stack ++ (List.range extra).map (fun j => Term.inp (s.inputs + j)),
+    { s with
+      stack := s.stack ++ (List.range extra).map (fun j => Term.inp (s.inputs + j)),
       inputs := s.inputs + extra }
 
 /-- One symbolic step. Mirrors `AStep`: `push`/`pop`/`dup`/`swap` shuffle the
@@ -165,15 +176,21 @@ def symStep (s : SymState) : Asm → Option SymState
       match pureArity yop with
       | some k =>
           let s := pad s k
-          some { stack := .app yop (s.stack.take k) :: s.stack.drop k,
-                 inputs := s.inputs }
+          let args := s.stack.take k
+          -- record every input that appears as a DIRECT op argument (a bare
+          -- `inp i`); nested inputs were already recorded when their containing
+          -- subterm was formed by an earlier op.
+          let exposed := args.filterMap (fun t => match t with | .inp i => some i | _ => none)
+          some { stack := .app yop args :: s.stack.drop k,
+                 inputs := s.inputs,
+                 opExposed := exposed ++ s.opExposed }
       | none => none
   | _ => none
 
 /-- Run a window symbolically from the empty stack. `none` if it contains any
 non-admissible instruction. -/
 def symExec (w : List Asm) : Option SymState :=
-  w.foldlM symStep { stack := [], inputs := 0 }
+  w.foldlM symStep { stack := [], inputs := 0, opExposed := [] }
 
 /-- Structural equality of symbolic states: same output terms and same input
 reach (the latter guarantees the untouched REST below the window lines up).
@@ -183,6 +200,22 @@ relaxation would normalize both states to the max input reach (materializing the
 extra deep leaves as identities) before comparing. -/
 def symStateBeq (a b : SymState) : Bool :=
   a.inputs == b.inputs && Term.beqList a.stack b.stack
+
+/-- **INTERFACE (authorized gate relaxation).** Net-effect equality of two
+symbolic states, normalizing input reach. A state that reaches only `inputs`
+slots leaves the deeper slots `inp inputs, inp (inputs+1), …` untouched below its
+output, so its full effect over `K ≥ inputs` slots is
+`stack ++ [inp inputs, …, inp (K-1)]`. Padding both to `K = max` and comparing is
+the true net-stack equality — sound, and (unlike `symStateBeq`) it admits a
+candidate that leaves/consumes fewer deep slots than the original. This is what
+lets the store-in-place scheduler (which leaves identity slots untouched,
+reaching fewer inputs) pass the gate. The proof agent re-proves
+`optimizeWindow_equiv` against this. -/
+def symStateEquiv (a b : SymState) : Bool :=
+  let K := Nat.max a.inputs b.inputs
+  let padTo (s : SymState) : List Term :=
+    s.stack ++ (List.range (K - s.inputs)).map (fun j => .inp (s.inputs + j))
+  Term.beqList (padTo a) (padTo b)
 
 /-! ### The scheduler (untrusted) + validation gate -/
 
@@ -242,16 +275,30 @@ def genValue : Nat → ES → Term → Option ES
           | .lit v => emit es (.push v)
           | .inp _ => none
           | .app op args =>
-              match genArgs fuel es args.reverse with
+              match genArgs fuel es args with
               | some es' => emit es' (.op op)
               | none => none
+/-- Build an op's arguments so the top-n become `[arg0, …, arg(n-1)]`. The
+deepest operand `arg(n-1)` is built first; if it is an already-computed
+INTERMEDIATE (`app`) sitting on top of the model, it is CONSUMED IN PLACE (no
+`DUP`) — the op will take it as its deepest operand — instead of copied. This is
+the chain-accumulator win: `mul(r,r)` on an intermediate `r` becomes `dup;mul`
+(1 DUP, `r` consumed) instead of two DUPs leaving `r` behind. Only intermediates
+are consumed this way, so the fixed `k`-input cleanup is unaffected; the gate
+rejects any consume that was not actually a last use. -/
 def genArgs : Nat → ES → List Term → Option ES
-  | _, es, [] => some es
   | 0, _, _ => none
-  | fuel + 1, es, a :: rest =>
-      match genValue fuel es a with
-      | some es' => genArgs fuel es' rest
-      | none => none
+  | fuel + 1, es, args =>
+      match args.reverse with
+      | [] => some es
+      | first :: restRev =>
+          let firstES :=
+            match first, es.model.stack.head? with
+            | .app _ _, some h => if Term.beq first h then some es else genValue fuel es first
+            | _, _ => genValue fuel es first
+          match firstES with
+          | none => none
+          | some e => restRev.foldlM (fun acc a => genValue fuel acc a) e
 end
 
 /-- Emit `n` pops. -/
@@ -286,8 +333,8 @@ def scheduleWindowReal (target : SymState) : Option (List Asm) :=
   let T := target.stack
   let m := T.length
   if m > 16 then none else
-  let fuel := 4 * (Term.sizeList T) + 100
-  let init : ES := ⟨[], { stack := (List.range k).map Term.inp, inputs := k }⟩
+  let fuel := 8 * (Term.sizeList T) + 100
+  let init : ES := ⟨[], { stack := (List.range k).map Term.inp, inputs := k, opExposed := [] }⟩
   if m == 0 then
     (emitPops init k).map ES.code
   else
@@ -299,10 +346,44 @@ def scheduleWindowReal (target : SymState) : Option (List Asm) :=
     | none => none
     | some es1 => (emitCleanup m es1 k).map ES.code
 
-/-- The untrusted rescheduler: given the window's symbolic output, propose a
-cheaper instruction sequence, or `none` to keep the original. Correctness never
-depends on it, only on the validation gate below. -/
-def scheduleWindow (target : SymState) : Option (List Asm) := scheduleWindowReal target
+/-- Store-in-place scheduler for canonical windows (`m = k`, non-changed slots
+are identity `inp j`): leave every identity slot exactly where it is (0 ops,
+unlike the rebuild which DUPs it then cleans it up) and, for each CHANGED slot,
+compute its value and write it in with `swap; pop`. This is the key to not
+rebuilding identity slots. Candidates reach fewer inputs than the original, so
+acceptance needs `symStateEquiv`'s input normalization. -/
+def scheduleStoreInPlace (target : SymState) : Option (List Asm) :=
+  let k := target.inputs
+  let T := target.stack
+  let m := T.length
+  if m != k then none else
+  let slots := T.zipIdx
+  let hasMove := slots.any (fun (t, j) => match t with | .inp i => i != j | _ => false)
+  if hasMove then none else
+  let changed := slots.filterMap (fun (t, j) =>
+    match t with | .inp _ => none | _ => some (j, t))
+  let fuel := 8 * (Term.sizeList T) + 100
+  let init : ES := ⟨[], { stack := (List.range k).map Term.inp, inputs := k, opExposed := [] }⟩
+  match changed.foldlM (fun es (p : Nat × Term) => genValue fuel es p.2) init with
+  | none => none
+  | some es1 =>
+      match changed.reverse.foldlM (fun es (p : Nat × Term) =>
+          match findIdxBeq (Term.inp p.1) es.model.stack with
+          | none => none
+          | some d =>
+              if h : 0 < d ∧ d - 1 < 16 then
+                match emit es (.swap ⟨d - 1, h.2⟩) with
+                | some es' => emit es' .pop
+                | none => none
+              else none) es1 with
+      | none => none
+      | some es2 => some es2.code
+
+/-- Candidate schedules for a window; the gate keeps the cheapest that validates
+and beats the original. Store-in-place first (best on identity-heavy canonical
+windows), then the general rebuild (handles `m ≠ k` / permutations). -/
+def scheduleCandidates (target : SymState) : List (List Asm) :=
+  (scheduleStoreInPlace target).toList ++ (scheduleWindowReal target).toList
 
 /-- Skip windows longer than this. `Term` is a tree, so a long run of squarings
 (`r := shr(127, mul(r,r))`, no barrier between blocks) would build terms of size
@@ -316,39 +397,57 @@ def maxWindowLen : Nat := 48
 nodes (belt-and-suspenders against tree blowup within the length cap). -/
 def maxTermNodes : Nat := 4096
 
-/-- Optimize one extracted window: keep the original unless a proposed candidate
-validates (same symbolic state), is strictly cheaper, and does not grow bytes. -/
+/-- Optimize one extracted window: among the candidate schedules, keep the
+cheapest that (1) is net-effect-equal to the original (`symStateEquiv`), (2)
+op-exposes only a SUBSET of the inputs the original op-exposed (so it never feeds
+an op a slot the original proved is a word — the `.code`-value soundness fix),
+and (3) does not grow bytes. Otherwise keep the original. Accepting only
+candidates STRICTLY cheaper than the ORIGINAL (never on estimated ties) is what
+makes the `opGas` `exp` underestimate safe. -/
 def optimizeWindow (w : List Asm) : List Asm :=
   if w.length > maxWindowLen then w else
   match symExec w with
   | none => w
   | some target =>
       if Term.sizeList target.stack > maxTermNodes then w else
-      match scheduleWindow target with
-      | none => w
-      | some cand =>
-          match symExec cand with
-          | some tcand =>
-              -- Accept only a translation-validated candidate (same symbolic
-              -- state, incl. equal input reach) that is STRICTLY cheaper than the
-              -- ORIGINAL and no larger in bytes. Comparing only against the
-              -- original (never accepting estimated ties) is what makes the
-              -- `opGas` `exp` underestimate safe.
-              if symStateBeq tcand target
-                  && windowGas cand < windowGas w
-                  && codeSize cand ≤ codeSize w then cand else w
-          | none => w
+      (scheduleCandidates target).foldl (fun best cand =>
+        match symExec cand with
+        | some tcand =>
+            if symStateEquiv tcand target
+                && tcand.opExposed.all (· ∈ target.opExposed)
+                && windowGas cand < windowGas best
+                && codeSize cand ≤ codeSize w then cand else best
+        | none => best) w
 
-/-- Split the program into maximal windows and non-window instructions, running
-`optimizeWindow` on each window. Fuel-bounded for a trivial termination
-argument; the bound `p.length + 1` always suffices. -/
+/-- Is a prefix height-preserving (`m = k`, a canonical/statement-boundary cut)
+with a bounded output DAG? Store-in-place needs this shape. -/
+def isCanonicalWindow (w : List Asm) : Bool :=
+  match symExec w with
+  | some s => s.stack.length == s.inputs && Term.sizeList s.stack ≤ maxTermNodes
+  | none => false
+
+/-- Window length inside a schedulable run: the LARGEST canonical (`m = k`,
+bounded-DAG) prefix up to `maxWindowLen`, so whole blocks become one
+store-in-place window instead of `m ≠ k` mid-computation fragments. Falls back to
+`maxWindowLen` (general rebuild) when no canonical prefix exists. Always ≥ 1. -/
+def cutLen (run : List Asm) : Nat :=
+  let cap := Nat.min run.length maxWindowLen
+  match (((List.range cap).map (· + 1)).filter (fun j => isCanonicalWindow (run.take j))).getLast? with
+  | some j => j
+  | none => Nat.max 1 cap
+
+/-- Split the program into windows (cut at canonical boundaries) and non-window
+instructions, running `optimizeWindow` on each. Fuel-bounded for a trivial
+termination argument; the bound `p.length + 1` always suffices. -/
 def scheduleAsmFuel : Nat → List Asm → List Asm
   | 0, p => p
   | _ + 1, [] => []
   | fuel + 1, i :: rest =>
       if schedulable i then
-        let win := (i :: rest).takeWhile schedulable
-        let tail := (i :: rest).dropWhile schedulable
+        let run := (i :: rest).takeWhile schedulable
+        let len := cutLen run
+        let win := run.take len
+        let tail := (i :: rest).drop len
         optimizeWindow win ++ scheduleAsmFuel fuel tail
       else
         i :: scheduleAsmFuel fuel rest
