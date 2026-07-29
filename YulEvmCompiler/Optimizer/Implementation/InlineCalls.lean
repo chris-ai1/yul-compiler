@@ -246,7 +246,7 @@ transform declines); they gate *when* inlining pays.
 /-- Profitability + stack-pressure gate (see the section notes). -/
 def inlineOK (d : IDecl) : Bool :=
   d.rs.length ≤ 2 &&
-  liveMaxStmts (d.ps.length + d.rs.length) d.ss ≤ 13
+  liveMaxStmts (d.ps.length + d.rs.length) d.ss ≤ 1
 
 /-! ### The site rewrite -/
 
