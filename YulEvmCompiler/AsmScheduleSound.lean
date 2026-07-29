@@ -1074,6 +1074,186 @@ theorem wfProg_scheduleAsm {p : List Asm} (hw : WFProg p) : WFProg (scheduleAsm 
     rw [labelRefs_scheduleAsm, labelDefs_scheduleAsm]; exact hw.refsDefined
   small := by have := codeSize_scheduleAsm_le p; have := hw.small; omega
 
+
+/-! ### Generalization to `AVal` stacks (for the whole-program bridge)
+
+Compiled runs put code addresses (return addresses) in window reach, so the
+bridge must reason over `AVal` stacks, not just words. `realizeA` mirrors
+`realize` but over an `AVal` valuation `ξ`; the `app` case forces its arguments
+to words via `avalWord` — sound exactly when every op-argument input is a word,
+which the `opExposed`-are-words hypothesis (recovered from the source run)
+guarantees. -/
+
+/-- Extract the word from an `AVal` (junk `0` on a code address; never hit under
+the `opExposed`-are-words hypothesis). -/
+def avalWord : AVal → U256
+  | .word v => v
+  | .code _ => 0
+
+/-- An `AVal` is a word. -/
+def isWordA (a : AVal) : Prop := ∃ v, a = .word v
+
+@[simp] theorem isWordA_word (v : U256) : isWordA (.word v) := ⟨v, rfl⟩
+
+theorem word_avalWord {a : AVal} (h : isWordA a) : AVal.word (avalWord a) = a := by
+  obtain ⟨v, rfl⟩ := h; rfl
+
+/-- The direct bare-`inp` indices of a term list (matches `symStep`'s op arm). -/
+def bareInps : List Term → List Nat :=
+  List.filterMap (fun t => match t with | .inp i => some i | _ => none)
+
+mutual
+/-- Realize a term over an `AVal` valuation `ξ`. -/
+def realizeA (yst : EvmState) (ξ : List AVal) : Term → AVal
+  | .inp i => ξ.getD i (.word 0)
+  | .lit v => .word v
+  | .app op args => .word (realizeOp op ((realizeListA yst ξ args).map avalWord) yst)
+def realizeListA (yst : EvmState) (ξ : List AVal) : List Term → List AVal
+  | [] => []
+  | t :: ts => realizeA yst ξ t :: realizeListA yst ξ ts
+end
+
+@[simp] theorem realizeListA_nil (yst ξ) : realizeListA yst ξ [] = [] := rfl
+@[simp] theorem realizeListA_cons (yst : EvmState) (ξ : List AVal) (t : Term) (ts : List Term) :
+    realizeListA yst ξ (t :: ts) = realizeA yst ξ t :: realizeListA yst ξ ts := rfl
+
+theorem realizeListA_eq_map (yst : EvmState) (ξ : List AVal) (l : List Term) :
+    realizeListA yst ξ l = l.map (realizeA yst ξ) := by
+  induction l with
+  | nil => rfl
+  | cons t ts ih => simp [realizeListA, ih]
+
+theorem realizeListA_append (yst : EvmState) (ξ : List AVal) (a b : List Term) :
+    realizeListA yst ξ (a ++ b) = realizeListA yst ξ a ++ realizeListA yst ξ b := by
+  simp [realizeListA_eq_map]
+
+@[simp] theorem realizeListA_length (yst : EvmState) (ξ : List AVal) (l : List Term) :
+    (realizeListA yst ξ l).length = l.length := by simp [realizeListA_eq_map]
+
+theorem realizeListA_set (yst : EvmState) (ξ : List AVal) (l : List Term) (i : Nat) (t : Term) :
+    realizeListA yst ξ (l.set i t) = (realizeListA yst ξ l).set i (realizeA yst ξ t) := by
+  simp [realizeListA_eq_map, List.map_set]
+
+/-- Polymorphic slice-of-`getD` identity (used for both `ι` and `ξ`). -/
+theorem range_map_getD_gen {α : Type _} (l : List α) (base extra : Nat) (d : α)
+    (h : base + extra ≤ l.length) :
+    (List.range extra).map (fun j => l.getD (base + j) d) = List.take extra (List.drop base l) := by
+  apply List.ext_getElem
+  · simp only [List.length_map, List.length_range, List.length_take, List.length_drop]; omega
+  · intro i h1 h2
+    simp only [List.length_map, List.length_range] at h1
+    rw [List.getElem_map, List.getElem_range, List.getElem_take, List.getElem_drop]
+    exact (List.getElem_eq_getD d).symm
+
+theorem realizeStackA_split (yst : EvmState) (ξ : List AVal) (P : List Term) (n : Nat)
+    (h : n < P.length) :
+    realizeListA yst ξ P
+      = realizeListA yst ξ (P.take n)
+        ++ realizeA yst ξ P[n] :: realizeListA yst ξ (P.drop (n + 1)) := by
+  conv_lhs => rw [← List.take_append_drop n P]
+  rw [realizeListA_append]
+  congr 1
+  rw [List.drop_eq_getElem_cons h, realizeListA_cons]
+
+theorem realizeStackA_split2 (yst : EvmState) (ξ : List AVal) (P : List Term) (n : Nat)
+    (h : n + 1 < P.length) :
+    realizeListA yst ξ P
+      = realizeA yst ξ P[0]
+        :: (realizeListA yst ξ ((P.take (n + 1)).drop 1)
+            ++ realizeA yst ξ P[n + 1] :: realizeListA yst ξ (P.drop (n + 2))) := by
+  rw [realizeStackA_split yst ξ P (n + 1) h]
+  have h0 : (0 : Nat) < (P.take (n + 1)).length := by rw [List.length_take]; omega
+  rw [realizeStackA_split yst ξ (P.take (n + 1)) 0 h0,
+    show n + 1 + 1 = n + 2 from by omega]
+  simp only [List.take_zero, realizeListA_nil, List.nil_append, Nat.zero_add,
+    List.getElem_take, List.cons_append]
+
+theorem realizeStackA_setset (yst : EvmState) (ξ : List AVal) (P : List Term)
+    (i j : Nat) (a b : Term) :
+    realizeListA yst ξ ((P.set i a).set j b)
+      = ((realizeListA yst ξ P).set i (realizeA yst ξ a)).set j (realizeA yst ξ b) := by
+  simp only [realizeListA_set]
+
+/-- `pad`'s realized concrete stack is unchanged over an `AVal` valuation. -/
+theorem pad_conc_A (yst : EvmState) (ξ : List AVal) (REST : List AVal)
+    (s : SymState) (need : Nat) (h : (pad s need).inputs ≤ ξ.length) :
+    realizeListA yst ξ (pad s need).stack ++ List.drop (pad s need).inputs ξ ++ REST
+      = realizeListA yst ξ s.stack ++ List.drop s.inputs ξ ++ REST := by
+  unfold pad at h ⊢
+  split
+  · rfl
+  · rename_i hlt
+    rw [if_neg hlt] at h
+    simp only at h ⊢
+    set extra := need - s.stack.length with hextra
+    have hmap : realizeListA yst ξ
+        ((List.range extra).map (fun j => Term.inp (s.inputs + j)))
+        = List.take extra (List.drop s.inputs ξ) := by
+      rw [realizeListA_eq_map, List.map_map,
+        show ((realizeA yst ξ) ∘ fun j => Term.inp (s.inputs + j))
+            = (fun j => ξ.getD (s.inputs + j) (.word 0)) from by funext j; rfl,
+        range_map_getD_gen ξ s.inputs extra (.word 0) (by omega)]
+    have hCeq : List.drop (s.inputs + extra) ξ = List.drop extra (List.drop s.inputs ξ) := by
+      rw [List.drop_drop]
+    have hBC : List.take extra (List.drop s.inputs ξ)
+        ++ List.drop extra (List.drop s.inputs ξ) = List.drop s.inputs ξ := List.take_append_drop _ _
+    rw [realizeListA_append, hmap, hCeq,
+      List.append_assoc (realizeListA yst ξ s.stack), hBC]
+
+/-- `pad` preserves `opExposed`. -/
+theorem pad_opExposed (s : SymState) (need : Nat) : (pad s need).opExposed = s.opExposed := by
+  unfold pad; split <;> rfl
+
+/-- A symbolic step never shrinks `opExposed`. -/
+theorem symStep_opExposed_sub {s0 s1 : SymState} {i : Asm} (h : symStep s0 i = some s1) :
+    ∀ x ∈ s0.opExposed, x ∈ s1.opExposed := by
+  cases i with
+  | push v => rw [symStep_push, Option.some.injEq] at h; intro x hx; rw [← h]; exact hx
+  | pop =>
+    rw [symStep_pop, Option.some.injEq] at h; intro x hx; rw [← h]
+    simpa [pad_opExposed] using hx
+  | dup m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl := pad_len s0 (n + 1)
+    rw [symStep_dup, List.getElem?_eq_getElem (by omega), Option.some.injEq] at h
+    intro x hx; rw [← h]; simpa [pad_opExposed] using hx
+  | swap m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl := pad_len s0 (n + 2)
+    rw [symStep_swap, List.getElem?_eq_getElem (by omega),
+      List.getElem?_eq_getElem (by omega), Option.some.injEq] at h
+    intro x hx; rw [← h]; simpa [pad_opExposed] using hx
+  | op yop =>
+    rw [symStep_op] at h
+    cases hpa : pureArity yop with
+    | none => rw [hpa] at h; exact absurd h (by simp)
+    | some k =>
+      rw [hpa, Option.some.injEq] at h
+      intro x hx; rw [← h]
+      simp only [List.mem_append]
+      exact Or.inr (by rw [pad_opExposed]; exact hx)
+  | label l => rw [symStep_label] at h; exact absurd h (by simp)
+  | jump l => rw [symStep_jump] at h; exact absurd h (by simp)
+  | jumpi l => rw [symStep_jumpi] at h; exact absurd h (by simp)
+  | pushLabel l => rw [symStep_pushLabel] at h; exact absurd h (by simp)
+  | dynJump => rw [symStep_dynJump] at h; exact absurd h (by simp)
+
+/-- Folding never shrinks `opExposed`. -/
+theorem foldlM_opExposed_sub : ∀ (ws : List Asm) {s0 s : SymState},
+    ws.foldlM symStep s0 = some s → ∀ x ∈ s0.opExposed, x ∈ s.opExposed := by
+  intro ws
+  induction ws with
+  | nil =>
+    intro s0 s h
+    rw [List.foldlM_nil] at h
+    obtain rfl : s0 = s := by simpa using h
+    exact fun x hx => hx
+  | cons i ws ih =>
+    intro s0 s h
+    rw [List.foldlM_cons] at h
+    obtain ⟨s1, h1, h2⟩ := Option.bind_eq_some_iff.mp h
+    exact fun x hx => ih h2 x (symStep_opExposed_sub h1 x hx)
+
 /-! ## Remaining gap: whole-program forward simulation for `compileScheduled`
 
 What is proved here reduces the pass to the executor and discharges it:
