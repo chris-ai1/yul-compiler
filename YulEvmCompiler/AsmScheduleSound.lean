@@ -472,3 +472,110 @@ theorem symStep_sound [model : ExternalModel] {prog : List Asm}
   | jumpi l => rw [symStep_jumpi] at hstep; exact absurd hstep (by simp)
   | pushLabel l => rw [symStep_pushLabel] at hstep; exact absurd hstep (by simp)
   | dynJump => rw [symStep_dynJump] at hstep; exact absurd hstep (by simp)
+
+/-! ### The window executor is sound -/
+
+/-- A symbolic step never shrinks the input reach. -/
+theorem symStep_inputs {s0 s1 : SymState} {i : Asm} (h : symStep s0 i = some s1) :
+    s0.inputs ≤ s1.inputs := by
+  cases i with
+  | push v =>
+    rw [symStep_push, Option.some.injEq] at h; have : s1.inputs = s0.inputs := by rw [← h]
+    omega
+  | pop =>
+    rw [symStep_pop, Option.some.injEq] at h
+    have : s1.inputs = (pad s0 1).inputs := by rw [← h]
+    rw [this]; exact pad_inputs s0 1
+  | dup m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl := pad_len s0 (n + 1)
+    have hnth : (pad s0 (n + 1)).stack[n]? = some ((pad s0 (n + 1)).stack[n]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    rw [symStep_dup, hnth, Option.some.injEq] at h
+    have : s1.inputs = (pad s0 (n + 1)).inputs := by rw [← h]
+    rw [this]; exact pad_inputs s0 (n + 1)
+  | swap m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl := pad_len s0 (n + 2)
+    have hnth0 : (pad s0 (n + 2)).stack[0]? = some ((pad s0 (n + 2)).stack[0]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    have hnth1 : (pad s0 (n + 2)).stack[n + 1]? = some ((pad s0 (n + 2)).stack[n + 1]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    rw [symStep_swap, hnth0, hnth1, Option.some.injEq] at h
+    have : s1.inputs = (pad s0 (n + 2)).inputs := by rw [← h]
+    rw [this]; exact pad_inputs s0 (n + 2)
+  | op yop =>
+    rw [symStep_op] at h
+    cases hpa : pureArity yop with
+    | none => rw [hpa] at h; simp at h
+    | some k =>
+      rw [hpa, Option.some.injEq] at h
+      have : s1.inputs = (pad s0 k).inputs := by rw [← h]
+      rw [this]; exact pad_inputs s0 k
+  | label l => rw [symStep_label] at h; exact absurd h (by simp)
+  | jump l => rw [symStep_jump] at h; exact absurd h (by simp)
+  | jumpi l => rw [symStep_jumpi] at h; exact absurd h (by simp)
+  | pushLabel l => rw [symStep_pushLabel] at h; exact absurd h (by simp)
+  | dynJump => rw [symStep_dynJump] at h; exact absurd h (by simp)
+
+/-- Folding symbolic steps never shrinks the input reach. -/
+theorem foldlM_inputs_mono : ∀ (ws : List Asm) (s0 s : SymState),
+    ws.foldlM symStep s0 = some s → s0.inputs ≤ s.inputs := by
+  intro ws
+  induction ws with
+  | nil =>
+    intro s0 s h
+    rw [List.foldlM_nil] at h
+    obtain rfl : s0 = s := by simpa using h
+    exact Nat.le_refl _
+  | cons i ws ih =>
+    intro s0 s h
+    rw [List.foldlM_cons] at h
+    obtain ⟨s1, h1, h2⟩ := Option.bind_eq_some_iff.mp h
+    exact le_trans (symStep_inputs h1) (ih s1 s h2)
+
+/-- The executor run, strengthened over an arbitrary starting symbolic state and
+window suffix. The concrete stack is always
+`realizeStack yst ι s.stack ++ words (drop s.inputs ι) ++ REST`. -/
+theorem symExec_run [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ι : List U256) (REST : List AVal) :
+    ∀ (ws : List Asm) (s0 s : SymState) (c : List Asm),
+      ws.foldlM symStep s0 = some s → s.inputs ≤ ι.length →
+      ASteps (model := model) prog
+        ⟨ws ++ c, realizeStack yst ι s0.stack ++ words (List.drop s0.inputs ι) ++ REST, yst⟩
+        ⟨c, realizeStack yst ι s.stack ++ words (List.drop s.inputs ι) ++ REST, yst⟩ := by
+  intro ws
+  induction ws with
+  | nil =>
+    intro s0 s c h hle
+    rw [List.foldlM_nil] at h
+    obtain rfl : s0 = s := by simpa using h
+    exact .refl _
+  | cons i ws ih =>
+    intro s0 s c h hle
+    rw [List.foldlM_cons] at h
+    obtain ⟨s1, h1, h2⟩ := Option.bind_eq_some_iff.mp h
+    have hle1 : s1.inputs ≤ ι.length := le_trans (foldlM_inputs_mono ws s1 s h2) hle
+    have hstep := symStep_sound (prog := prog) (model := model) yst ι REST (rest := ws ++ c) h1 hle1
+    have hrec := ih s1 s c h2 hle
+    rw [List.cons_append]
+    exact hstep.trans hrec
+
+/-- **Executor soundness.** If `symExec w = some s`, then on every concrete input
+stack `words ι ++ REST` with `ι.length = s.inputs`, the window `w` steps to
+`realizeStack yst ι s.stack ++ REST`: the realized output terms on top and the
+`REST` below the window untouched (and the machine state `yst` unchanged, since a
+window is pure). -/
+theorem symExec_sound [model : ExternalModel] {prog : List Asm}
+    {w : List Asm} {s : SymState} (h : symExec w = some s)
+    (ι : List U256) (hlen : ι.length = s.inputs) (REST : List AVal)
+    (yst : EvmState) (c : List Asm) :
+    ASteps (model := model) prog
+      ⟨w ++ c, words ι ++ REST, yst⟩
+      ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩ := by
+  have hrun := symExec_run (prog := prog) (model := model) yst ι REST w
+    { stack := [], inputs := 0 } s c h (le_of_eq hlen.symm)
+  simp only [realizeStack_nil, List.drop_zero, List.nil_append] at hrun
+  rw [show s.inputs = ι.length from hlen.symm, List.drop_length, words_nil,
+    List.append_nil] at hrun
+  exact hrun
