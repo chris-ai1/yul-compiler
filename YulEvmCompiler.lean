@@ -9,6 +9,8 @@ import YulEvmCompiler.Asm
 import YulEvmCompiler.AsmSem
 import YulEvmCompiler.AsmPeephole
 import YulEvmCompiler.AsmPeepholeSound
+import YulEvmCompiler.AsmSchedule
+import YulEvmCompiler.AsmScheduleSound
 import YulEvmCompiler.Compile
 import YulEvmCompiler.Examples
 import YulEvmCompiler.LowerDefs

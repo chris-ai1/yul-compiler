@@ -672,3 +672,310 @@ theorem optimizeWindow_equiv [model : ExternalModel] {prog : List Asm}
     ASteps (model := model) prog ⟨optimizeWindow w ++ c, words ι ++ REST, yst⟩
       ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩ :=
   symExec_sound (optimizeWindow_symExec hw) ι hlen REST yst c
+
+/-! ### Structural preservation by `scheduleAsm`
+
+`scheduleAsm` only rewrites label/jump-free windows into label/jump-free code and
+copies everything else verbatim, so it preserves `labelDefs`, `labelRefs`, and
+never grows `codeSize` — hence it preserves `WFProg`. This is the label-structure
+half of what an end-to-end `compileScheduled` correctness proof needs (the other
+half — the whole-program forward simulation — is discussed in the closing note). -/
+
+theorem schedulable_op_eq (yop : Op) : schedulable (.op yop) = (pureArity yop).isSome := rfl
+theorem schedulable_label_eq (l : Label) : schedulable (.label l) = false := rfl
+theorem schedulable_jump_eq (l : Label) : schedulable (.jump l) = false := rfl
+theorem schedulable_jumpi_eq (l : Label) : schedulable (.jumpi l) = false := rfl
+theorem schedulable_pushLabel_eq (l : Label) : schedulable (.pushLabel l) = false := rfl
+theorem schedulable_dynJump_eq : schedulable .dynJump = false := rfl
+
+theorem schedulable_defines {i : Asm} (h : schedulable i = true) : i.defines = none := by
+  cases i with
+  | label l => rw [schedulable_label_eq] at h; exact absurd h (by simp)
+  | _ => rfl
+
+theorem schedulable_references {i : Asm} (h : schedulable i = true) : i.references = none := by
+  cases i with
+  | jump l => rw [schedulable_jump_eq] at h; exact absurd h (by simp)
+  | jumpi l => rw [schedulable_jumpi_eq] at h; exact absurd h (by simp)
+  | pushLabel l => rw [schedulable_pushLabel_eq] at h; exact absurd h (by simp)
+  | label l => rw [schedulable_label_eq] at h; exact absurd h (by simp)
+  | _ => rfl
+
+/-- A successful symbolic step only fires on window-admissible instructions. -/
+theorem symStep_some_schedulable {s s' : SymState} {i : Asm}
+    (h : symStep s i = some s') : schedulable i = true := by
+  cases i with
+  | push v => rfl
+  | pop => rfl
+  | dup n => rfl
+  | swap n => rfl
+  | op yop =>
+    rw [symStep_op] at h
+    cases hpa : pureArity yop with
+    | none => rw [hpa] at h; exact absurd h (by simp)
+    | some k => rw [schedulable_op_eq, hpa]; rfl
+  | label l => rw [symStep_label] at h; exact absurd h (by simp)
+  | jump l => rw [symStep_jump] at h; exact absurd h (by simp)
+  | jumpi l => rw [symStep_jumpi] at h; exact absurd h (by simp)
+  | pushLabel l => rw [symStep_pushLabel] at h; exact absurd h (by simp)
+  | dynJump => rw [symStep_dynJump] at h; exact absurd h (by simp)
+
+/-- A window-admissible instruction always steps symbolically. -/
+theorem symStep_isSome_of_schedulable (s : SymState) {i : Asm}
+    (h : schedulable i = true) : (symStep s i).isSome := by
+  cases i with
+  | push v => rw [symStep_push]; rfl
+  | pop => rw [symStep_pop]; rfl
+  | dup n =>
+    obtain ⟨n, hn⟩ := n
+    rw [symStep_dup,
+      List.getElem?_eq_getElem (l := (pad s (n+1)).stack) (i := n)
+        (by have := pad_len s (n+1); omega)]
+    rfl
+  | swap n =>
+    obtain ⟨n, hn⟩ := n
+    rw [symStep_swap,
+      List.getElem?_eq_getElem (l := (pad s (n+2)).stack) (i := 0)
+        (by have := pad_len s (n+2); omega),
+      List.getElem?_eq_getElem (l := (pad s (n+2)).stack) (i := n+1)
+        (by have := pad_len s (n+2); omega)]
+    rfl
+  | op yop =>
+    rw [symStep_op]
+    cases hpa : pureArity yop with
+    | none => rw [schedulable_op_eq, hpa] at h; exact absurd h (by simp)
+    | some k => rfl
+  | label l => rw [schedulable_label_eq] at h; exact absurd h (by simp)
+  | jump l => rw [schedulable_jump_eq] at h; exact absurd h (by simp)
+  | jumpi l => rw [schedulable_jumpi_eq] at h; exact absurd h (by simp)
+  | pushLabel l => rw [schedulable_pushLabel_eq] at h; exact absurd h (by simp)
+  | dynJump => rw [schedulable_dynJump_eq] at h; exact absurd h (by simp)
+
+/-- Every instruction reached by a successful `foldlM symStep` is admissible. -/
+theorem foldlM_all_schedulable : ∀ (w : List Asm) {s0 s : SymState},
+    w.foldlM symStep s0 = some s → ∀ i ∈ w, schedulable i = true := by
+  intro w
+  induction w with
+  | nil => intro s0 s _ i hi; exact absurd hi (by simp)
+  | cons j w ih =>
+    intro s0 s h i hi
+    rw [List.foldlM_cons] at h
+    obtain ⟨s1, h1, h2⟩ := Option.bind_eq_some_iff.mp h
+    rcases List.mem_cons.mp hi with rfl | hi
+    · exact symStep_some_schedulable h1
+    · exact ih h2 i hi
+
+/-- A window of admissible instructions always symbolically executes. -/
+theorem symExec_isSome_of_schedulable {w : List Asm}
+    (h : ∀ i ∈ w, schedulable i = true) : (symExec w).isSome := by
+  unfold symExec
+  suffices hgen : ∀ (v : List Asm) (s0 : SymState), (∀ i ∈ v, schedulable i = true) →
+      (v.foldlM symStep s0).isSome by exact hgen w _ h
+  intro v
+  induction v with
+  | nil => intro s0 _; rw [List.foldlM_nil]; rfl
+  | cons j v ih =>
+    intro s0 hv
+    rw [List.foldlM_cons]
+    obtain ⟨s1, hs1⟩ := Option.isSome_iff_exists.mp
+      (symStep_isSome_of_schedulable s0 (hv j List.mem_cons_self))
+    rw [hs1]
+    exact ih s1 (fun i hi => hv i (List.mem_cons_of_mem _ hi))
+
+theorem labelDefs_eq_nil_of_schedulable {w : List Asm}
+    (h : ∀ i ∈ w, schedulable i = true) : labelDefs w = [] := by
+  induction w with
+  | nil => rfl
+  | cons i w ih =>
+    rw [labelDefs_cons, schedulable_defines (h i List.mem_cons_self), Option.toList_none,
+      List.nil_append]
+    exact ih (fun j hj => h j (List.mem_cons_of_mem _ hj))
+
+theorem labelRefs_eq_nil_of_schedulable {w : List Asm}
+    (h : ∀ i ∈ w, schedulable i = true) : labelRefs w = [] := by
+  induction w with
+  | nil => rfl
+  | cons i w ih =>
+    rw [labelRefs_cons, schedulable_references (h i List.mem_cons_self), Option.toList_none,
+      List.nil_append]
+    exact ih (fun j hj => h j (List.mem_cons_of_mem _ hj))
+
+/-- `optimizeWindow` output is label-free (every instruction is admissible,
+because `symExec` accepts it — the original when unchanged, the candidate only
+when it symbolically executes). -/
+theorem optimizeWindow_all_schedulable {w : List Asm}
+    (hw : ∀ i ∈ w, schedulable i = true) : ∀ i ∈ optimizeWindow w, schedulable i = true := by
+  obtain ⟨s, hs⟩ := Option.isSome_iff_exists.mp (symExec_isSome_of_schedulable hw)
+  exact foldlM_all_schedulable (optimizeWindow w) (optimizeWindow_symExec hs)
+
+theorem labelDefs_optimizeWindow {w : List Asm} (hw : ∀ i ∈ w, schedulable i = true) :
+    labelDefs (optimizeWindow w) = [] :=
+  labelDefs_eq_nil_of_schedulable (optimizeWindow_all_schedulable hw)
+
+theorem labelRefs_optimizeWindow {w : List Asm} (hw : ∀ i ∈ w, schedulable i = true) :
+    labelRefs (optimizeWindow w) = [] :=
+  labelRefs_eq_nil_of_schedulable (optimizeWindow_all_schedulable hw)
+
+/-- `optimizeWindow` never grows the lowered byte size (the gate requires
+`codeSize cand ≤ codeSize w`; otherwise it keeps the original). -/
+theorem codeSize_optimizeWindow_le (w : List Asm) :
+    codeSize (optimizeWindow w) ≤ codeSize w := by
+  unfold optimizeWindow
+  repeat' split
+  all_goals
+    first
+      | exact Nat.le_refl _
+      | (rename_i hgate
+         rw [Bool.and_eq_true, Bool.and_eq_true] at hgate
+         exact of_decide_eq_true hgate.2)
+
+/-- Every element of a `takeWhile schedulable` prefix is admissible. -/
+theorem takeWhile_all_schedulable : ∀ (p : List Asm),
+    ∀ i ∈ p.takeWhile schedulable, schedulable i = true := by
+  intro p
+  induction p with
+  | nil => intro i hi; exact absurd hi (by simp [List.takeWhile])
+  | cons j p ih =>
+    intro i hi
+    rw [List.takeWhile_cons] at hi
+    split at hi
+    · rename_i hj
+      rcases List.mem_cons.mp hi with rfl | hi
+      · exact hj
+      · exact ih i hi
+    · exact absurd hi (by simp)
+
+/-- Dropping the admissible prefix keeps the label definitions. -/
+theorem labelDefs_dropWhile_schedulable (p : List Asm) :
+    labelDefs (p.dropWhile schedulable) = labelDefs p := by
+  conv_rhs => rw [← List.takeWhile_append_dropWhile (p := schedulable) (l := p)]
+  rw [labelDefs_append, labelDefs_eq_nil_of_schedulable (takeWhile_all_schedulable p),
+    List.nil_append]
+
+theorem labelRefs_dropWhile_schedulable (p : List Asm) :
+    labelRefs (p.dropWhile schedulable) = labelRefs p := by
+  conv_rhs => rw [← List.takeWhile_append_dropWhile (p := schedulable) (l := p)]
+  rw [labelRefs_append, labelRefs_eq_nil_of_schedulable (takeWhile_all_schedulable p),
+    List.nil_append]
+
+/-- `scheduleAsmFuel` preserves the defined labels. -/
+theorem labelDefs_scheduleAsmFuel : ∀ (fuel : Nat) (p : List Asm),
+    labelDefs (scheduleAsmFuel fuel p) = labelDefs p := by
+  intro fuel
+  induction fuel with
+  | zero => intro p; rfl
+  | succ fuel ih =>
+    intro p
+    cases p with
+    | nil => rfl
+    | cons i rest =>
+      rw [scheduleAsmFuel]
+      split
+      · rw [labelDefs_append, labelDefs_optimizeWindow (takeWhile_all_schedulable _), ih,
+          List.nil_append, labelDefs_dropWhile_schedulable]
+      · rw [labelDefs_cons, ih, ← labelDefs_cons]
+
+theorem labelRefs_scheduleAsmFuel : ∀ (fuel : Nat) (p : List Asm),
+    labelRefs (scheduleAsmFuel fuel p) = labelRefs p := by
+  intro fuel
+  induction fuel with
+  | zero => intro p; rfl
+  | succ fuel ih =>
+    intro p
+    cases p with
+    | nil => rfl
+    | cons i rest =>
+      rw [scheduleAsmFuel]
+      split
+      · rw [labelRefs_append, labelRefs_optimizeWindow (takeWhile_all_schedulable _), ih,
+          List.nil_append, labelRefs_dropWhile_schedulable]
+      · rw [labelRefs_cons, ih, ← labelRefs_cons]
+
+theorem codeSize_scheduleAsmFuel_le : ∀ (fuel : Nat) (p : List Asm),
+    codeSize (scheduleAsmFuel fuel p) ≤ codeSize p := by
+  intro fuel
+  induction fuel with
+  | zero => intro p; exact Nat.le_refl _
+  | succ fuel ih =>
+    intro p
+    cases p with
+    | nil => exact Nat.le_refl _
+    | cons i rest =>
+      rw [scheduleAsmFuel]
+      split
+      · rw [codeSize_append]
+        calc codeSize (optimizeWindow ((i :: rest).takeWhile schedulable))
+              + codeSize (scheduleAsmFuel fuel ((i :: rest).dropWhile schedulable))
+            ≤ codeSize ((i :: rest).takeWhile schedulable)
+              + codeSize ((i :: rest).dropWhile schedulable) :=
+              Nat.add_le_add (codeSize_optimizeWindow_le _) (ih _)
+          _ = codeSize (i :: rest) := by
+              rw [← codeSize_append, List.takeWhile_append_dropWhile]
+      · rw [codeSize_cons, codeSize_cons]
+        exact Nat.add_le_add (Nat.le_refl _) (ih rest)
+
+/-- `scheduleAsm` preserves the program's defined labels. -/
+theorem labelDefs_scheduleAsm (p : List Asm) : labelDefs (scheduleAsm p) = labelDefs p :=
+  labelDefs_scheduleAsmFuel _ p
+
+/-- `scheduleAsm` preserves the program's referenced labels. -/
+theorem labelRefs_scheduleAsm (p : List Asm) : labelRefs (scheduleAsm p) = labelRefs p :=
+  labelRefs_scheduleAsmFuel _ p
+
+/-- `scheduleAsm` never grows the lowered byte size. -/
+theorem codeSize_scheduleAsm_le (p : List Asm) : codeSize (scheduleAsm p) ≤ codeSize p :=
+  codeSize_scheduleAsmFuel_le _ p
+
+/-- **`scheduleAsm` preserves whole-program well-formedness**, so a
+`compileScheduled` that inserts it before lowering still lowers (its `WFProg`
+premise survives, `codeRel_wf`-style). -/
+theorem wfProg_scheduleAsm {p : List Asm} (hw : WFProg p) : WFProg (scheduleAsm p) where
+  nodup := by rw [labelDefs_scheduleAsm]; exact hw.nodup
+  refsDefined := by
+    rw [labelRefs_scheduleAsm, labelDefs_scheduleAsm]; exact hw.refsDefined
+  small := by have := codeSize_scheduleAsm_le p; have := hw.small; omega
+
+/-! ## Remaining gap: whole-program forward simulation for `compileScheduled`
+
+What is proved here reduces the pass to the executor and discharges it:
+
+* `symExec_sound` — the executor is sound (the one lemma the design targets);
+* `schedule_equiv` / `optimizeWindow_equiv` — the translation-validation gate is
+  sound: an accepted window is step-equivalent to the original on every suitable
+  concrete stack;
+* `wfProg_scheduleAsm` (+ `labelDefs`/`labelRefs`/`codeSize` preservation) — the
+  label-structure/size half of `compileScheduled`: inserting `scheduleAsm` before
+  `lowerProg` keeps `WFProg`, so lowering still succeeds and the address bound
+  holds.
+
+The one remaining step to upgrade the unverified `compileScheduled`
+(`Compile.lean`) / `compileObjectScheduled` (`ObjectCompile.lean`) to the
+`compile`-level correctness statement is a **whole-program forward simulation**
+`scheduleAsm_asteps`/`_ahalt` in the shape of
+`Peephole.optimizeAsm_asteps`/`optimizeAsm_ahalt`, i.e. a `steps_sim` over a
+`CodeRel`-style relation on suffixes (call it `SchedRel`, with a `window`
+constructor pairing `w` with `optimizeWindow w`). Two facts make the pieces fit,
+and one is the real work:
+
+* *Control flow is preserved.* Windows are label/jump-free
+  (`labelDefs_optimizeWindow`/`labelRefs_optimizeWindow`), so `findLabel` on the
+  scheduled program matches the source on every referenced label (a
+  `codeRel_findLabel` analogue over `SchedRel`), and `StkRefs` is preserved
+  exactly as in `AsmPeepholeSound`.
+* *Each window is step-equivalent.* This is `optimizeWindow_equiv`.
+
+* *Mid-window matching (the work).* Because a window is many instructions and the
+  candidate is arbitrary (not a fixed 2–3 instruction peephole), the `Match`
+  relation cannot enumerate in-flight states the way `AsmPeepholeSound.Match`
+  does. The natural route is a source-stuttering simulation: while the source is
+  mid-window the optimized side takes no steps, and when the source reaches the
+  window boundary the optimized side fires all of `optimizeWindow w` at once via
+  `optimizeWindow_equiv`. Making that precise needs (a) a word-typing invariant —
+  `symExec_sound` requires the window's `s.inputs` reached slots to be `AVal.word`
+  (`words ι`), which holds because a successful source `AStep.op` consumes
+  `words args`, but extracting `ι : List U256` from the *given* source run is a
+  small completeness-flavoured lemma (the top `s.inputs` values are words); and
+  (b) determinism of pure `AStep` to align the stuttered source prefix with the
+  stored window transform. Neither is deep, but both are more than the executor
+  soundness that was this file's mandate, and a `sorry` is disallowed here
+  (`warningAsError`), so they are documented rather than stubbed. -/
