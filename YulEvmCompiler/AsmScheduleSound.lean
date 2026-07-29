@@ -250,7 +250,7 @@ theorem realizeStack_split2 (yst : EvmState) (ι : List U256) (P : List Term) (n
   rw [realizeStack_split yst ι (P.take (n + 1)) 0 h0,
     show n + 1 + 1 = n + 2 from by omega]
   simp only [List.take_zero, realizeStack_nil, List.nil_append, Nat.zero_add,
-    List.getElem_take]
+    List.getElem_take, List.cons_append]
 
 /-- The two `List.set`s a symbolic `swap` performs realise to an actual
 top/deep exchange. -/
@@ -348,6 +348,47 @@ theorem astep_op_realize [model : ExternalModel] {prog : List Asm}
     (c := rest) (σ := realizeStack yst ι (P.drop k) ++ tail) (yst := yst) (yst' := yst) hbp
   simpa [words] using ASteps.single hstep
 
+/-! ### `symStep` equation lemmas
+
+`simp only [symStep]` loops on `symStep`'s generated equation lemmas (the nested
+`pad`/`match` structure), so we expose the reductions as plain `rfl` lemmas and
+`rw` with them instead. -/
+
+theorem symStep_push (s : SymState) (v : U256) :
+    symStep s (.push v) = some { s with stack := .lit v :: s.stack } := rfl
+
+theorem symStep_pop (s : SymState) :
+    symStep s .pop = some { (pad s 1) with stack := (pad s 1).stack.drop 1 } := rfl
+
+theorem symStep_dup (s : SymState) (n : Nat) (hn : n < 16) :
+    symStep s (.dup ⟨n, hn⟩) =
+      (match (pad s (n + 1)).stack[n]? with
+       | some t => some { (pad s (n + 1)) with stack := t :: (pad s (n + 1)).stack }
+       | none => none) := rfl
+
+theorem symStep_swap (s : SymState) (n : Nat) (hn : n < 16) :
+    symStep s (.swap ⟨n, hn⟩) =
+      (match (pad s (n + 2)).stack[0]?, (pad s (n + 2)).stack[n + 1]? with
+       | some a, some b =>
+           some { (pad s (n + 2)) with
+             stack := ((pad s (n + 2)).stack.set 0 b).set (n + 1) a }
+       | _, _ => none) := rfl
+
+theorem symStep_op (s : SymState) (yop : Op) :
+    symStep s (.op yop) =
+      (match pureArity yop with
+       | some k =>
+           some { stack := .app yop ((pad s k).stack.take k) :: (pad s k).stack.drop k,
+                  inputs := (pad s k).inputs }
+       | none => none) := rfl
+
+theorem symStep_label (s : SymState) (l : Label) : symStep s (.label l) = none := rfl
+theorem symStep_jump (s : SymState) (l : Label) : symStep s (.jump l) = none := rfl
+theorem symStep_jumpi (s : SymState) (l : Label) : symStep s (.jumpi l) = none := rfl
+theorem symStep_pushLabel (s : SymState) (l : Label) :
+    symStep s (.pushLabel l) = none := rfl
+theorem symStep_dynJump (s : SymState) : symStep s .dynJump = none := rfl
+
 /-! ### Single symbolic step is sound -/
 
 /-- One symbolic step of a window-admissible instruction is realised by one
@@ -364,12 +405,12 @@ theorem symStep_sound [model : ExternalModel] {prog : List Asm}
       ⟨rest, realizeStack yst ι s1.stack ++ words (List.drop s1.inputs ι) ++ REST, yst⟩ := by
   cases i with
   | push v =>
-    simp only [symStep, Option.some.injEq] at hstep
+    rw [symStep_push, Option.some.injEq] at hstep
     subst hstep
     simp only [realizeStack_cons, realize, List.cons_append]
     exact .single AStep.push
   | pop =>
-    simp only [symStep, Option.some.injEq] at hstep
+    rw [symStep_pop, Option.some.injEq] at hstep
     subst hstep
     dsimp only
     have hle' : (pad s0 1).inputs ≤ ι.length := hle
@@ -387,10 +428,10 @@ theorem symStep_sound [model : ExternalModel] {prog : List Asm}
     have hpl : n + 1 ≤ (pad s0 (n + 1)).stack.length := pad_len s0 (n + 1)
     have hnth : (pad s0 (n + 1)).stack[n]? = some ((pad s0 (n + 1)).stack[n]'(by omega)) :=
       List.getElem?_eq_getElem (by omega)
-    simp only [symStep, hnth, Option.some.injEq] at hstep
-    subst hstep
+    rw [symStep_dup, hnth, Option.some.injEq] at hstep
+    have hle' : (pad s0 (n + 1)).inputs ≤ ι.length := by rw [← hstep] at hle; exact hle
+    rw [← hstep]
     dsimp only
-    have hle' : (pad s0 (n + 1)).inputs ≤ ι.length := hle
     rw [← pad_conc yst ι REST s0 (n + 1) hle']
     set P := (pad s0 (n + 1)).stack with hP
     rw [realizeStack_cons, List.append_assoc, List.append_assoc]
@@ -403,22 +444,21 @@ theorem symStep_sound [model : ExternalModel] {prog : List Asm}
       List.getElem?_eq_getElem (by omega)
     have hnth1 : (pad s0 (n + 2)).stack[n + 1]? = some ((pad s0 (n + 2)).stack[n + 1]'(by omega)) :=
       List.getElem?_eq_getElem (by omega)
-    simp only [symStep, hnth0, hnth1, Option.some.injEq] at hstep
-    subst hstep
+    rw [symStep_swap, hnth0, hnth1, Option.some.injEq] at hstep
+    have hle' : (pad s0 (n + 2)).inputs ≤ ι.length := by rw [← hstep] at hle; exact hle
+    rw [← hstep]
     dsimp only
-    have hle' : (pad s0 (n + 2)).inputs ≤ ι.length := hle
     rw [← pad_conc yst ι REST s0 (n + 2) hle']
     set P := (pad s0 (n + 2)).stack with hP
     rw [List.append_assoc, List.append_assoc]
     exact astep_swap_realize yst ι (words (List.drop (pad s0 (n + 2)).inputs ι) ++ REST) P n hn
       (by omega)
   | op yop =>
-    simp only [symStep] at hstep
+    rw [symStep_op] at hstep
     cases hpa : pureArity yop with
     | none => rw [hpa] at hstep; simp at hstep
     | some k =>
-      rw [hpa] at hstep
-      simp only [Option.some.injEq] at hstep
+      rw [hpa, Option.some.injEq] at hstep
       subst hstep
       dsimp only
       have hle' : (pad s0 k).inputs ≤ ι.length := hle
@@ -427,8 +467,8 @@ theorem symStep_sound [model : ExternalModel] {prog : List Asm}
       rw [List.append_assoc, List.append_assoc]
       exact astep_op_realize yst ι (words (List.drop (pad s0 k).inputs ι) ++ REST) P yop k hpa
         (by have := pad_len s0 k; omega)
-  | label l => simp only [symStep, reduceCtorEq] at hstep
-  | jump l => simp only [symStep, reduceCtorEq] at hstep
-  | jumpi l => simp only [symStep, reduceCtorEq] at hstep
-  | pushLabel l => simp only [symStep, reduceCtorEq] at hstep
-  | dynJump => simp only [symStep, reduceCtorEq] at hstep
+  | label l => rw [symStep_label] at hstep; exact absurd hstep (by simp)
+  | jump l => rw [symStep_jump] at hstep; exact absurd hstep (by simp)
+  | jumpi l => rw [symStep_jumpi] at hstep; exact absurd hstep (by simp)
+  | pushLabel l => rw [symStep_pushLabel] at hstep; exact absurd hstep (by simp)
+  | dynJump => rw [symStep_dynJump] at hstep; exact absurd hstep (by simp)
