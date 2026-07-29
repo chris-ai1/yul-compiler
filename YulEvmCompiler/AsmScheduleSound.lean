@@ -1006,23 +1006,34 @@ window *drops* are locals (words) — so the pass is in fact sound. But that is 
 property of the **backend's stack discipline**, not of the acceptance gate: the
 gate (`symStateBeq`, or the incoming `symStateEquiv`) cannot see it.
 
-Consequently a rigorous whole-program bridge needs one of:
+**Resolved design (Route 2 — strengthened gate, `opExposed`).** `SymState` gains
+`opExposed : List Nat`, the input indices ever passed *directly* to an op during
+`symExec`; the gate additionally requires `opExposed(candidate) ⊆
+opExposed(original)`. This makes the word-typing *compositional*:
 
-1. **A run-time stack-typing invariant** — threaded like `StkRefs` — establishing
-   that every reached slot a window *drops* (pops / op-consumes) is a word, i.e.
-   code addresses in window reach are only ever preserved. Then `symExec`-equality
-   over `AVal` follows and the source-stuttering simulation (optimized side fires
-   `optimizeWindow w` atomically at the window boundary, via `optimizeWindow_equiv`
-   / `symExec_sound_pad`, using pure-`AStep` determinism to align the stuttered
-   prefix) goes through. This is the faithful route but a substantial invariant.
-2. **A strengthened gate** that additionally certifies each reached leaf is either
-   preserved or dropped without an op (a "linear, op-free treatment of dropped
-   inputs" side condition on the candidate), making `AVal`-level equivalence
-   follow from acceptance directly. Smaller proof, but it is an *interface* change
-   to `optimizeWindow` (coordinate with the scheduler agent).
+* A successful **source** run of the original window proves every
+  `opExposed(original)` slot is a word (`AStep.op` demands `words args`) — the
+  word-typing hypothesis, now recovered from the source run instead of a backend
+  invariant.
+* The candidate applies ops only to inputs in `opExposed(candidate) ⊆
+  opExposed(original)`, all words; `push`/`dup`/`swap`/`pop` are `AVal`-untyped, so
+  shuffling/dropping code addresses is safe on both sides. `AVal`-level
+  equivalence then follows from acceptance.
+* Counterexample dispatched: `w = [pop]`, `w' = [iszero, pop]` have
+  `opExposed = ∅` vs `{0}`, and `{0} ⊄ ∅`, so `w'` is rejected.
 
-`symExec_sound_pad` above is the executor lemma either route consumes (it is also
-what re-proves `optimizeWindow_equiv` against the relaxed `symStateEquiv` gate:
-compose acceptance with the padded net-transform characterization). A `sorry` is
-disallowed here (`warningAsError`), so the missing operational-equivalence-over-
-`AVal` lemma is documented rather than stubbed. -/
+Recording only *direct* bare-`inp` op-args is inductively **complete**: an `inp i`
+nested inside an arg term `app …[… inp i …]` was necessarily a direct bare arg to
+the op that first wrapped it (term-building happens only at op steps), so it was
+exposed then; `dup` merely copies exposure-status. The formal invariant to prove
+is: for every `app` subterm anywhere in `s.stack`, all its `inp` indices ∈
+`s.opExposed`.
+
+Remaining proof work, once the `opExposed` interface lands (bundled with
+`symStateEquiv`): (1) generalize `realize`/`symExec_sound` to `AVal` under the
+`opExposed`-are-words hypothesis; (2) re-prove `optimizeWindow_equiv` against
+`symStateEquiv` (net-effect, via `symExec_sound_pad`) ∧ the `opExposed ⊆` subset
+condition; (3) the source-stuttering `scheduleAsm_asteps`/`_ahalt`, firing each
+`optimizeWindow w` atomically at the window boundary via pure-`AStep`
+determinism. A `sorry` is disallowed here (`warningAsError`), so this is
+documented rather than stubbed until the interface is in place. -/

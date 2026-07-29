@@ -34,24 +34,39 @@ scheduleAsm_ahalt :  -- the halting-run counterpart
 ```
 
 Ingredients already in `AsmScheduleSound.lean`: `optimizeWindow_equiv`
-(each window is step-equivalent), `labelDefs_optimizeWindow` /
-`labelRefs_optimizeWindow` (windows and their rewrites are label/jump-free, so
-`findLabel` is preserved — a `codeRel_findLabel` analogue over a `SchedRel`
-relation on suffixes). The two pieces still to build (see the closing note in
-`AsmScheduleSound.lean`):
+(each window is step-equivalent over word stacks), `symExec_sound_pad` (the
+net-transform characterization the `symStateEquiv` gate needs),
+`labelDefs_optimizeWindow` / `labelRefs_optimizeWindow` (windows and their
+rewrites are label/jump-free, so `findLabel` is preserved — a `codeRel_findLabel`
+analogue over a `SchedRel` relation on suffixes).
 
-1. a **word-typing** lemma — `symExec_sound` needs the window's `s.inputs`
-   reached slots to be `AVal.word`, which holds because a successful source
-   `AStep.op` consumes `words args`; extract `ι : List U256` from the given
-   source run;
-2. **determinism of pure `AStep`** to align the stuttered source prefix with the
-   stored window transform (source-stuttering simulation: the optimized side
-   fires all of `optimizeWindow w` at the window boundary via
-   `optimizeWindow_equiv`).
+**Critical finding (resolved via Route 2).** `symExec`-equality does *not* imply
+operational equality over stacks holding **code addresses**: `[pop]` and
+`[iszero, pop]` have equal `symExec` but diverge on `.code L :: σ` (the op gets
+stuck — `AStep.op` needs `words args`). Compiled runs *do* put return addresses
+in window reach (`compileArgs`' `dup` reaches past `pushLabel Lret`; the epilogue
+`retRot` window). So the acceptance gate needs to be strengthened.
 
-Neither is deep, but both are beyond the executor-soundness mandate. Until they
-land, the merge cannot proceed at full rigor — **do not** merge on the strength
-of the executor lemmas alone.
+**Resolved design — Route 2 (`opExposed`):** `SymState` gains
+`opExposed : List Nat` (input indices ever passed *directly* to an op), and the
+gate additionally requires `opExposed(candidate) ⊆ opExposed(original)`. Then:
+a successful **source** run proves every `opExposed(original)` slot is a word
+(the word-typing hypothesis, recovered from the run, not a backend invariant);
+the candidate ops only on that subset, all words; `push`/`dup`/`swap`/`pop` are
+`AVal`-untyped so code-address shuffling/dropping is safe. This is an **interface
+change** bundled with `symStateEquiv` by the scheduler agent — the exact Lean
+shape is agreed in the proof agent's report (SymState field, `symStep.op`
+recording `bareInps (take k)`, gate subset check; `symStateEquiv`/`symStateBeq`
+ignore `opExposed`).
+
+Remaining proof work once that interface lands: (1) generalize
+`realize`/`symExec_sound` to `AVal` under the `opExposed`-are-words hypothesis;
+(2) re-prove `optimizeWindow_equiv` against `symStateEquiv ∧ opExposed⊆`;
+(3) source-stuttering `scheduleAsm_asteps`/`_ahalt` (fire `optimizeWindow w`
+atomically at the window boundary via pure-`AStep` determinism).
+
+Until this lands, the merge cannot proceed at full rigor — **do not** merge on
+the strength of the executor lemmas alone.
 
 ---
 
