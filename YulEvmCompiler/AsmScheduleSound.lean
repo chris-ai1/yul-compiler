@@ -1,6 +1,7 @@
 import YulEvmCompiler.AsmSchedule
 import YulEvmCompiler.AsmSem
 set_option warningAsError true
+set_option maxRecDepth 4000
 /-!
 # YulEvmCompiler.AsmScheduleSound
 
@@ -209,3 +210,225 @@ theorem pad_conc (yst : EvmState) (ι : List U256) (REST : List AVal)
     rw [realizeStack, realizeList_append, words_append, hmap, hCeq,
       List.append_assoc (words (realizeList yst ι s.stack)), hBC]
     rfl
+
+/-! ### List helpers for the per-instruction cases -/
+
+@[simp] theorem realizeStack_length (yst : EvmState) (ι : List U256) (l : List Term) :
+    (realizeStack yst ι l).length = l.length := by
+  simp [realizeStack, words, realizeList_eq_map]
+
+theorem realizeList_set (yst : EvmState) (ι : List U256) (l : List Term) (i : Nat)
+    (t : Term) :
+    realizeList yst ι (l.set i t) = (realizeList yst ι l).set i (realize yst ι t) := by
+  simp [realizeList_eq_map, List.map_set]
+
+theorem words_set (l : List U256) (i : Nat) (v : U256) :
+    words (l.set i v) = (words l).set i (.word v) := by
+  simp [words, List.map_set]
+
+/-- Split a realized stack at index `n` into prefix / element / suffix. -/
+theorem realizeStack_split (yst : EvmState) (ι : List U256) (P : List Term) (n : Nat)
+    (h : n < P.length) :
+    realizeStack yst ι P
+      = realizeStack yst ι (P.take n)
+        ++ .word (realize yst ι P[n]) :: realizeStack yst ι (P.drop (n + 1)) := by
+  conv_lhs => rw [← List.take_append_drop n P]
+  rw [realizeStack_append]
+  congr 1
+  rw [List.drop_eq_getElem_cons h, realizeStack_cons]
+
+/-- Split a realized stack at indices `0` and `n+1` (for the `swap` case). The
+middle block `(P.take (n+1)).drop 1` has length `n`. -/
+theorem realizeStack_split2 (yst : EvmState) (ι : List U256) (P : List Term) (n : Nat)
+    (h : n + 1 < P.length) :
+    realizeStack yst ι P
+      = .word (realize yst ι P[0])
+        :: (realizeStack yst ι ((P.take (n + 1)).drop 1)
+            ++ .word (realize yst ι P[n + 1]) :: realizeStack yst ι (P.drop (n + 2))) := by
+  rw [realizeStack_split yst ι P (n + 1) h]
+  have h0 : (0 : Nat) < (P.take (n + 1)).length := by rw [List.length_take]; omega
+  rw [realizeStack_split yst ι (P.take (n + 1)) 0 h0,
+    show n + 1 + 1 = n + 2 from by omega]
+  simp only [List.take_zero, realizeStack_nil, List.nil_append, Nat.zero_add,
+    List.getElem_take]
+
+/-- The two `List.set`s a symbolic `swap` performs realise to an actual
+top/deep exchange. -/
+theorem swap_set_eq {α : Type _} {n : Nat} (a b : α) (τ ρ : List α)
+    (h : τ.length = n) :
+    (((a :: (τ ++ b :: ρ)).set 0 b).set (n + 1) a) = b :: (τ ++ a :: ρ) := by
+  rw [List.set_cons_zero, List.set_cons_succ, List.set_append, if_neg (by omega), h,
+    Nat.sub_self, List.set_cons_zero]
+
+/-- Realizing a doubly-`set` term list. -/
+theorem realizeStack_setset (yst : EvmState) (ι : List U256) (P : List Term)
+    (i j : Nat) (a b : Term) :
+    realizeStack yst ι ((P.set i a).set j b)
+      = ((realizeStack yst ι P).set i (.word (realize yst ι a))).set j
+          (.word (realize yst ι b)) := by
+  simp only [realizeStack, realizeList_set, words_set]
+
+/-! ### Per-instruction `AStep` packages
+
+Each window instruction's concrete effect, phrased against the realized stack
+`realizeStack yst ι P ++ tail`. The `symStep_sound` cases below just supply the
+padded stack for `P` and `words (drop …) ++ REST` for `tail`. -/
+
+/-- `dup` copies the realized term at depth `n`. -/
+theorem astep_dup_realize [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ι : List U256) (tail : List AVal) (P : List Term) (n : Nat)
+    (hn16 : n < 16) (h : n < P.length) {rest : List Asm} :
+    ASteps (model := model) prog
+      ⟨.dup ⟨n, hn16⟩ :: rest, realizeStack yst ι P ++ tail, yst⟩
+      ⟨rest, .word (realize yst ι P[n]) :: (realizeStack yst ι P ++ tail), yst⟩ := by
+  have hsrc : realizeStack yst ι P ++ tail
+      = realizeStack yst ι (P.take n)
+        ++ .word (realize yst ι P[n]) :: (realizeStack yst ι (P.drop (n + 1)) ++ tail) := by
+    rw [realizeStack_split yst ι P n h]; simp only [List.cons_append, List.append_assoc]
+  rw [hsrc]
+  exact .single (AStep.dup (n := ⟨n, hn16⟩) (v := .word (realize yst ι P[n]))
+    (τ := realizeStack yst ι (P.take n))
+    (ρ := realizeStack yst ι (P.drop (n + 1)) ++ tail)
+    (by show (realizeStack yst ι (P.take n)).length = n
+        rw [realizeStack_length, List.length_take]; omega))
+
+/-- `swap` exchanges the realized top with the realized term at depth `n+1`. -/
+theorem astep_swap_realize [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ι : List U256) (tail : List AVal) (P : List Term) (n : Nat)
+    (hn16 : n < 16) (h : n + 1 < P.length) {rest : List Asm} :
+    ASteps (model := model) prog
+      ⟨.swap ⟨n, hn16⟩ :: rest, realizeStack yst ι P ++ tail, yst⟩
+      ⟨rest, realizeStack yst ι ((P.set 0 P[n + 1]).set (n + 1) P[0]) ++ tail, yst⟩ := by
+  have hτlen : (realizeStack yst ι ((P.take (n + 1)).drop 1)).length = n := by
+    rw [realizeStack_length, List.length_drop, List.length_take]; omega
+  have hsrc : realizeStack yst ι P ++ tail
+      = .word (realize yst ι P[0])
+        :: (realizeStack yst ι ((P.take (n + 1)).drop 1)
+            ++ .word (realize yst ι P[n + 1])
+               :: (realizeStack yst ι (P.drop (n + 2)) ++ tail)) := by
+    rw [realizeStack_split2 yst ι P n h]; simp only [List.cons_append, List.append_assoc]
+  have htgt : realizeStack yst ι ((P.set 0 P[n + 1]).set (n + 1) P[0]) ++ tail
+      = .word (realize yst ι P[n + 1])
+        :: (realizeStack yst ι ((P.take (n + 1)).drop 1)
+            ++ .word (realize yst ι P[0])
+               :: (realizeStack yst ι (P.drop (n + 2)) ++ tail)) := by
+    rw [realizeStack_setset, realizeStack_split2 yst ι P n h,
+      swap_set_eq (.word (realize yst ι P[0])) (.word (realize yst ι P[n + 1]))
+        (realizeStack yst ι ((P.take (n + 1)).drop 1))
+        (realizeStack yst ι (P.drop (n + 2))) hτlen]
+    simp only [List.cons_append, List.append_assoc]
+  rw [hsrc, htgt]
+  exact .single (AStep.swap (n := ⟨n, hn16⟩) (a := .word (realize yst ι P[0]))
+    (b := .word (realize yst ι P[n + 1]))
+    (τ := realizeStack yst ι ((P.take (n + 1)).drop 1))
+    (ρ := realizeStack yst ι (P.drop (n + 2)) ++ tail) hτlen)
+
+/-- A pure `op` consumes the realized top `k` terms and pushes the realized
+`app` term (which is the same pure-op result on their realizations). -/
+theorem astep_op_realize [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ι : List U256) (tail : List AVal) (P : List Term) (yop : Op)
+    (k : Nat) (hpa : pureArity yop = some k) (hk : k ≤ P.length) {rest : List Asm} :
+    ASteps (model := model) prog
+      ⟨.op yop :: rest, realizeStack yst ι P ++ tail, yst⟩
+      ⟨rest, realizeStack yst ι (.app yop (P.take k) :: P.drop k) ++ tail, yst⟩ := by
+  have hargk : (realizeList yst ι (P.take k)).length = k := by
+    rw [realizeList_eq_map, List.length_map, List.length_take]; omega
+  have hsrc : realizeStack yst ι P ++ tail
+      = words (realizeList yst ι (P.take k)) ++ (realizeStack yst ι (P.drop k) ++ tail) := by
+    conv_lhs => rw [← List.take_append_drop k P, realizeStack_append]
+    rw [List.append_assoc]; rfl
+  have htgt : realizeStack yst ι (.app yop (P.take k) :: P.drop k) ++ tail
+      = .word (realizeOp yop (realizeList yst ι (P.take k)) yst)
+        :: (realizeStack yst ι (P.drop k) ++ tail) := by
+    rw [realizeStack_cons, realize, List.cons_append]
+  rw [hsrc, htgt]
+  have hbp := builtin_pure model.calls model.creates yop yst (by rw [hargk]; exact hpa)
+  have hstep := AStep.op (model := model) (prog := prog) (yop := yop)
+    (args := realizeList yst ι (P.take k)) (rets := [realizeOp yop (realizeList yst ι (P.take k)) yst])
+    (c := rest) (σ := realizeStack yst ι (P.drop k) ++ tail) (yst := yst) (yst' := yst) hbp
+  simpa [words] using ASteps.single hstep
+
+/-! ### Single symbolic step is sound -/
+
+/-- One symbolic step of a window-admissible instruction is realised by one
+concrete `AStep`. The invariant is that the concrete stack is
+`realizeStack yst ι s.stack ++ words (drop s.inputs ι) ++ REST`: the realized
+output terms on top, then the `ι` slots the window has not yet reached, then the
+untouched `REST`. -/
+theorem symStep_sound [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ι : List U256) (REST : List AVal)
+    {s0 s1 : SymState} {i : Asm} {rest : List Asm}
+    (hstep : symStep s0 i = some s1) (hle : s1.inputs ≤ ι.length) :
+    ASteps (model := model) prog
+      ⟨i :: rest, realizeStack yst ι s0.stack ++ words (List.drop s0.inputs ι) ++ REST, yst⟩
+      ⟨rest, realizeStack yst ι s1.stack ++ words (List.drop s1.inputs ι) ++ REST, yst⟩ := by
+  cases i with
+  | push v =>
+    simp only [symStep, Option.some.injEq] at hstep
+    subst hstep
+    simp only [realizeStack_cons, realize, List.cons_append]
+    exact .single AStep.push
+  | pop =>
+    simp only [symStep, Option.some.injEq] at hstep
+    subst hstep
+    dsimp only
+    have hle' : (pad s0 1).inputs ≤ ι.length := hle
+    rw [← pad_conc yst ι REST s0 1 hle']
+    obtain ⟨x, xs, hxs⟩ : ∃ x xs, (pad s0 1).stack = x :: xs := by
+      have := pad_len s0 1
+      match hp : (pad s0 1).stack with
+      | [] => rw [hp] at this; simp at this
+      | y :: ys => exact ⟨y, ys, rfl⟩
+    rw [hxs]
+    simp only [realizeStack_cons, List.drop_succ_cons, List.drop_zero, List.cons_append]
+    exact .single AStep.pop
+  | dup m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl : n + 1 ≤ (pad s0 (n + 1)).stack.length := pad_len s0 (n + 1)
+    have hnth : (pad s0 (n + 1)).stack[n]? = some ((pad s0 (n + 1)).stack[n]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    simp only [symStep, hnth, Option.some.injEq] at hstep
+    subst hstep
+    dsimp only
+    have hle' : (pad s0 (n + 1)).inputs ≤ ι.length := hle
+    rw [← pad_conc yst ι REST s0 (n + 1) hle']
+    set P := (pad s0 (n + 1)).stack with hP
+    rw [realizeStack_cons, List.append_assoc, List.append_assoc]
+    exact astep_dup_realize yst ι (words (List.drop (pad s0 (n + 1)).inputs ι) ++ REST) P n hn
+      (by omega)
+  | swap m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl : n + 2 ≤ (pad s0 (n + 2)).stack.length := pad_len s0 (n + 2)
+    have hnth0 : (pad s0 (n + 2)).stack[0]? = some ((pad s0 (n + 2)).stack[0]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    have hnth1 : (pad s0 (n + 2)).stack[n + 1]? = some ((pad s0 (n + 2)).stack[n + 1]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    simp only [symStep, hnth0, hnth1, Option.some.injEq] at hstep
+    subst hstep
+    dsimp only
+    have hle' : (pad s0 (n + 2)).inputs ≤ ι.length := hle
+    rw [← pad_conc yst ι REST s0 (n + 2) hle']
+    set P := (pad s0 (n + 2)).stack with hP
+    rw [List.append_assoc, List.append_assoc]
+    exact astep_swap_realize yst ι (words (List.drop (pad s0 (n + 2)).inputs ι) ++ REST) P n hn
+      (by omega)
+  | op yop =>
+    simp only [symStep] at hstep
+    cases hpa : pureArity yop with
+    | none => rw [hpa] at hstep; simp at hstep
+    | some k =>
+      rw [hpa] at hstep
+      simp only [Option.some.injEq] at hstep
+      subst hstep
+      dsimp only
+      have hle' : (pad s0 k).inputs ≤ ι.length := hle
+      rw [← pad_conc yst ι REST s0 k hle']
+      set P := (pad s0 k).stack with hP
+      rw [List.append_assoc, List.append_assoc]
+      exact astep_op_realize yst ι (words (List.drop (pad s0 k).inputs ι) ++ REST) P yop k hpa
+        (by have := pad_len s0 k; omega)
+  | label l => simp only [symStep, reduceCtorEq] at hstep
+  | jump l => simp only [symStep, reduceCtorEq] at hstep
+  | jumpi l => simp only [symStep, reduceCtorEq] at hstep
+  | pushLabel l => simp only [symStep, reduceCtorEq] at hstep
+  | dynJump => simp only [symStep, reduceCtorEq] at hstep
