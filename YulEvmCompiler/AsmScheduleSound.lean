@@ -579,3 +579,96 @@ theorem symExec_sound [model : ExternalModel] {prog : List Asm}
   rw [show s.inputs = ι.length from hlen.symm, List.drop_length, words_nil,
     List.append_nil] at hrun
   exact hrun
+
+/-! ### Translation-validation corollaries
+
+The gate accepts a candidate only when its `SymState` is `symStateBeq`-equal to
+the original's. Since `symStateBeq`/`Term.beq` are structural equality, an
+accepted candidate has *literally the same* `SymState`, hence — by
+`symExec_sound` — the same net transformation. -/
+
+theorem Term.beq_inp (x y : Nat) : Term.beq (.inp x) (.inp y) = (x == y) := rfl
+theorem Term.beq_lit (x y : U256) : Term.beq (.lit x) (.lit y) = (x == y) := rfl
+theorem Term.beq_app (o1 o2 : Op) (as1 as2 : List Term) :
+    Term.beq (.app o1 as1) (.app o2 as2) = (o1 == o2 && Term.beqList as1 as2) := rfl
+theorem Term.beqList_cons (x : Term) (xs : List Term) (y : Term) (ys : List Term) :
+    Term.beqList (x :: xs) (y :: ys) = (Term.beq x y && Term.beqList xs ys) := rfl
+
+/-! `Term.beq` is genuine structural equality. -/
+mutual
+theorem Term.beq_eq : ∀ {a b : Term}, Term.beq a b = true → a = b
+  | .inp x, .inp y, h => by rw [Term.beq_inp] at h; rw [eq_of_beq h]
+  | .lit x, .lit y, h => by rw [Term.beq_lit] at h; rw [eq_of_beq h]
+  | .app o1 as1, .app o2 as2, h => by
+      rw [Term.beq_app, Bool.and_eq_true] at h
+      obtain ⟨ho, has⟩ := h
+      rw [of_decide_eq_true ho, Term.beqList_eq has]
+  | .inp _, .lit _, h => Bool.noConfusion h
+  | .inp _, .app _ _, h => Bool.noConfusion h
+  | .lit _, .inp _, h => Bool.noConfusion h
+  | .lit _, .app _ _, h => Bool.noConfusion h
+  | .app _ _, .inp _, h => Bool.noConfusion h
+  | .app _ _, .lit _, h => Bool.noConfusion h
+theorem Term.beqList_eq : ∀ {a b : List Term}, Term.beqList a b = true → a = b
+  | [], [], _ => rfl
+  | x :: xs, y :: ys, h => by
+      rw [Term.beqList_cons, Bool.and_eq_true] at h
+      obtain ⟨hx, hxs⟩ := h
+      rw [Term.beq_eq hx, Term.beqList_eq hxs]
+  | [], _ :: _, h => Bool.noConfusion h
+  | _ :: _, [], h => Bool.noConfusion h
+end
+
+/-- An accepted candidate has the identical symbolic state. -/
+theorem symStateBeq_eq {a b : SymState} (h : symStateBeq a b = true) : a = b := by
+  rw [symStateBeq, Bool.and_eq_true] at h
+  obtain ⟨hi, hs⟩ := h
+  have hi' : a.inputs = b.inputs := eq_of_beq hi
+  have hs' : a.stack = b.stack := Term.beqList_eq hs
+  cases a; cases b; simp_all
+
+/-- **Translation validation.** Two windows with the same `symExec` result have
+the *same* net transformation on every suitable concrete stack — they reach an
+identical endpoint. Hence they are interchangeable inside any program. -/
+theorem schedule_equiv [model : ExternalModel] {prog : List Asm}
+    {w w' : List Asm} {s : SymState}
+    (hw : symExec w = some s) (hw' : symExec w' = some s)
+    (ι : List U256) (hlen : ι.length = s.inputs) (REST : List AVal)
+    (yst : EvmState) (c : List Asm) :
+    ASteps (model := model) prog ⟨w ++ c, words ι ++ REST, yst⟩
+        ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩
+      ∧ ASteps (model := model) prog ⟨w' ++ c, words ι ++ REST, yst⟩
+        ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩ :=
+  ⟨symExec_sound hw ι hlen REST yst c, symExec_sound hw' ι hlen REST yst c⟩
+
+/-- The gate makes `optimizeWindow` preserve the symbolic state. -/
+theorem optimizeWindow_symExec {w : List Asm} {s : SymState} (hw : symExec w = some s) :
+    symExec (optimizeWindow w) = some s := by
+  unfold optimizeWindow
+  split
+  · exact hw
+  · rw [hw]
+    dsimp only
+    split
+    · exact hw
+    · split
+      · exact hw
+      · split
+        · rename_i tcand htcand
+          split
+          · rename_i hgate
+            rw [Bool.and_eq_true, Bool.and_eq_true] at hgate
+            obtain ⟨⟨hbeq, -⟩, -⟩ := hgate
+            rw [htcand, symStateBeq_eq hbeq]
+          · exact hw
+        · exact hw
+
+/-- **Window optimization is sound.** Whatever the untrusted scheduler emitted,
+`optimizeWindow w` has exactly `w`'s net transformation. -/
+theorem optimizeWindow_equiv [model : ExternalModel] {prog : List Asm}
+    {w : List Asm} {s : SymState} (hw : symExec w = some s)
+    (ι : List U256) (hlen : ι.length = s.inputs) (REST : List AVal)
+    (yst : EvmState) (c : List Asm) :
+    ASteps (model := model) prog ⟨optimizeWindow w ++ c, words ι ++ REST, yst⟩
+      ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩ :=
+  symExec_sound (optimizeWindow_symExec hw) ι hlen REST yst c
