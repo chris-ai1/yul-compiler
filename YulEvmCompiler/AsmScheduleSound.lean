@@ -580,6 +580,30 @@ theorem symExec_sound [model : ExternalModel] {prog : List Asm}
     List.append_nil] at hrun
   exact hrun
 
+/-- **Executor soundness at a deeper input count (pad-soundness).** The same
+window, fed a stack that supplies *more* words than it reaches (`s.inputs ≤
+ι.length`), transforms `words ι ++ REST` to `realizeStack yst ι s.stack ++
+words (drop s.inputs ι) ++ REST`: the reached slots are realized and the extra
+`ι` slots below the reach pass through as themselves (the window acts as the
+identity on slots deeper than `s.inputs`).
+
+This is the net-transform characterization a `symStateEquiv`-style gate needs:
+a candidate reaching `c.inputs ≤ s.inputs` slots, when compared after padding its
+`SymState` up to `s.inputs`, has this very transform at input count `s.inputs`,
+so equal padded states ⇒ equal transforms. It is a pure specialization of
+`symExec_run` (which was already stated with `≤`, not `=`), hence gate-agnostic
+and true of the current `symExec`. -/
+theorem symExec_sound_pad [model : ExternalModel] {prog : List Asm}
+    {w : List Asm} {s : SymState} (h : symExec w = some s)
+    (ι : List U256) (hle : s.inputs ≤ ι.length) (REST : List AVal)
+    (yst : EvmState) (c : List Asm) :
+    ASteps (model := model) prog
+      ⟨w ++ c, words ι ++ REST, yst⟩
+      ⟨c, realizeStack yst ι s.stack ++ words (List.drop s.inputs ι) ++ REST, yst⟩ := by
+  have hrun := symExec_run (prog := prog) (model := model) yst ι REST w
+    { stack := [], inputs := 0 } s c h hle
+  simpa only [realizeStack_nil, List.drop_zero, List.nil_append] using hrun
+
 /-! ### Translation-validation corollaries
 
 The gate accepts a candidate only when its `SymState` is `symStateBeq`-equal to
@@ -953,29 +977,52 @@ The one remaining step to upgrade the unverified `compileScheduled`
 `compile`-level correctness statement is a **whole-program forward simulation**
 `scheduleAsm_asteps`/`_ahalt` in the shape of
 `Peephole.optimizeAsm_asteps`/`optimizeAsm_ahalt`, i.e. a `steps_sim` over a
-`CodeRel`-style relation on suffixes (call it `SchedRel`, with a `window`
-constructor pairing `w` with `optimizeWindow w`). Two facts make the pieces fit,
-and one is the real work:
+`CodeRel`-style relation on suffixes (`SchedRel`, with a `window` constructor
+pairing `w` with `optimizeWindow w`). The *control-flow* half is clean — windows
+are label/jump-free (`labelDefs_optimizeWindow`/`labelRefs_optimizeWindow`), so
+`findLabel` is preserved (a `codeRel_findLabel` analogue) and `StkRefs` carries
+over from `AsmPeepholeSound`. The *simulation* half runs into a **genuine
+soundness subtlety, not mere plumbing**, described here so it is not lost:
 
-* *Control flow is preserved.* Windows are label/jump-free
-  (`labelDefs_optimizeWindow`/`labelRefs_optimizeWindow`), so `findLabel` on the
-  scheduled program matches the source on every referenced label (a
-  `codeRel_findLabel` analogue over `SchedRel`), and `StkRefs` is preserved
-  exactly as in `AsmPeepholeSound`.
-* *Each window is step-equivalent.* This is `optimizeWindow_equiv`.
+**`symExec`-equality does NOT imply operational equality over stacks that hold
+code addresses.** Counterexample: `w = [pop]` and `w' = [op iszero, pop]` both
+have `symExec = { stack := [], inputs := 1 }` (the reached leaf `inp 0` is
+dropped either way). On a concrete stack `.code L :: σ`, `w` steps to `σ`, but
+`w'` gets **stuck** — `AStep.op` requires `words args`, and `.code L` is not a
+word. So a candidate that *drops* a reached slot via an op instead of a `pop` is
+symbolically indistinguishable yet behaviorally different when that slot is a
+code address. `symExec_sound`/`schedule_equiv`/`optimizeWindow_equiv` are
+therefore, correctly, stated over **word** stacks (`words ι`) only.
 
-* *Mid-window matching (the work).* Because a window is many instructions and the
-  candidate is arbitrary (not a fixed 2–3 instruction peephole), the `Match`
-  relation cannot enumerate in-flight states the way `AsmPeepholeSound.Match`
-  does. The natural route is a source-stuttering simulation: while the source is
-  mid-window the optimized side takes no steps, and when the source reaches the
-  window boundary the optimized side fires all of `optimizeWindow w` at once via
-  `optimizeWindow_equiv`. Making that precise needs (a) a word-typing invariant —
-  `symExec_sound` requires the window's `s.inputs` reached slots to be `AVal.word`
-  (`words ι`), which holds because a successful source `AStep.op` consumes
-  `words args`, but extracting `ι : List U256` from the *given* source run is a
-  small completeness-flavoured lemma (the top `s.inputs` values are words); and
-  (b) determinism of pure `AStep` to align the stuttered source prefix with the
-  stored window transform. Neither is deep, but both are more than the executor
-  soundness that was this file's mandate, and a `sorry` is disallowed here
-  (`warningAsError`), so they are documented rather than stubbed. -/
+This matters because compiled runs *do* put code addresses in window reach: the
+calling convention (`Compile.lean` `compileExpr`/`compileArgs`, the
+`pushLabel Lret ; push 0×k ; <args>` shape) computes arguments in a window whose
+`dup ⟨off + 1 + rets + idx⟩` reaches **past** the pushed return address
+(`.code Lret`); the function epilogue's `pop×n ; retRot k` window likewise reaches
+the return address. In the actual backend those code-address slots are always
+*preserved* (a bare `inp` leaf in the output, reproduced by any
+symbolically-equal candidate only via `dup`/`swap`, never an op) and the slots a
+window *drops* are locals (words) — so the pass is in fact sound. But that is a
+property of the **backend's stack discipline**, not of the acceptance gate: the
+gate (`symStateBeq`, or the incoming `symStateEquiv`) cannot see it.
+
+Consequently a rigorous whole-program bridge needs one of:
+
+1. **A run-time stack-typing invariant** — threaded like `StkRefs` — establishing
+   that every reached slot a window *drops* (pops / op-consumes) is a word, i.e.
+   code addresses in window reach are only ever preserved. Then `symExec`-equality
+   over `AVal` follows and the source-stuttering simulation (optimized side fires
+   `optimizeWindow w` atomically at the window boundary, via `optimizeWindow_equiv`
+   / `symExec_sound_pad`, using pure-`AStep` determinism to align the stuttered
+   prefix) goes through. This is the faithful route but a substantial invariant.
+2. **A strengthened gate** that additionally certifies each reached leaf is either
+   preserved or dropped without an op (a "linear, op-free treatment of dropped
+   inputs" side condition on the candidate), making `AVal`-level equivalence
+   follow from acceptance directly. Smaller proof, but it is an *interface* change
+   to `optimizeWindow` (coordinate with the scheduler agent).
+
+`symExec_sound_pad` above is the executor lemma either route consumes (it is also
+what re-proves `optimizeWindow_equiv` against the relaxed `symStateEquiv` gate:
+compose acceptance with the padded net-transform characterization). A `sorry` is
+disallowed here (`warningAsError`), so the missing operational-equivalence-over-
+`AVal` lemma is documented rather than stubbed. -/
