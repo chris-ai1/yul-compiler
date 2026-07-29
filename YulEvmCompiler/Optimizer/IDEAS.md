@@ -1365,3 +1365,86 @@ compose that result with the existing `Simplify` resolution congruence for the
   relabeling, a different argument than `CodeRel`'s in-place windows), and
   iterating the scan (a dropped branch's `jumpi` can orphan its label for a
   second round).
+
+## Candidate next ideas (measured negatives — Pool* spill campaign)
+
+Both entries below come from attacking the same target: the Pool* fixtures
+(`test/uniswap-v4`, PoolSwap.sol) whose gas gap vs solc is dominated by
+`MemorySpill` round-tripping ~637 bindings through memory (each spilled *use*
+is an `mstore`/`mload`, ≈9 gas). The differential harness excludes final memory
+from the gas comparison but compares it for behavior, so stores may not be
+removed — only loads forwarded. Both levers below were confirmed
+proof-free before measuring (see each entry) and both were measured negative.
+
+### ❌ Cost-aware spill-victim selection (`agent/uv4-spill-select`, measured, rejected)
+
+`MemorySpillSelect.selectLoop` spills the binding *witnessed at physical stack
+depth ≥16* (a `DUP17+`/`SWAP17+` failure), to a fixpoint. Hypothesis: among the
+candidates that could relieve a given pressure — the deep witness itself, or any
+binding physically *above* it (spilling an above-binding drops the witness one
+slot, since `physicalDecls` filters selected bindings out of the next layout) —
+prefer the *cheapest* by a hotness cost model (weighted static use count,
+`loopWeight^depth` per read + per decl/assign/param store), so hot accumulators
+stay on the stack and cold bindings spill instead.
+
+**Proof-impact: none (selection-independent).** `spillBlock?` runs `selectSpills`
+then re-validates every certificate the soundness proof consumes (`selectedWF`,
+`selectedBindingsWF`, `groupsClosedCheck`, `layoutCheck`, and the residual
+`firstPressure [] rewritten = none`); `spillBlock_facts` proves `SpillFacts` by
+`unfold spillBlock?` without unfolding `selectSpills`, and no `MemorySpill*Sound`
+proof reads `SpillFacts.selected`. Rewriting the heuristic (new cost model, new
+victim logic, `Pressure.batch` repurposed to carry above-candidates) kept the
+whole proof family green.
+
+**Result (vs pinned `test/uniswap-v4-gas-baseline.txt`):**
+- Aggressive (spill cheapest above-binding per witness, batched):
+  swapExactInputNoTick 60332 → **78984 (+18652)**, uniform PoolSwap regressions,
+  total +46k. A shallow spill only lifts a witness one slot; with the usual
+  deficit >1 the deep binding is spilled anyway, so diversion *adds* spills.
+- Conservative (1-for-1 substitution only at `deficit == 1` with a strictly
+  cheaper above-binding): flat, net −6 gas with ±4 noise. Hot accumulators sit
+  well below the `DUP16` frontier (large deficit), so the frontier rule never
+  reaches them.
+- Shift-block one-at-a-time (shared relief, batch disabled): correct but the
+  selection loop times out (>10 min) on PoolSwap's 637-spill object; the batch
+  is a hard performance requirement.
+
+**Diagnosis:** gas is dominated by spill *count* (uses-weighted), which
+per-witness victim choice cannot reduce; the only count-reducer (coordinated
+shift-block) either over-spills cold bindings whose aggregate cost exceeds the
+one hot spill, or is too slow. The existing depth-victim policy is already near
+cost-optimal for this stack structure.
+
+### ❌ Pressure-gated (reduced) inlining (`agent/uv4-inline-gate`, measured, rejected)
+
+`InlineCalls` inlines call-free helpers whenever `inlineOK d` holds
+(`d.rs.length ≤ 2 && liveMaxStmts (…) d.ss ≤ 13`). Hypothesis: on Pool* objects
+this packs so many live bindings into one frame that `MemorySpill` must spill
+637 of them; inlining *less* would shrink frames, reduce spills, and (net of the
+added call protocol) save gas.
+
+**Proof-impact: none (gate-independent).** `InlineCallsSound.icStmts_rel` cases
+on `(inlineOK d && siteOK …)` as an opaque `Bool` with both branches proven
+(the relation's skip rules absorb any declined site); `inlineOK`'s definition is
+never inspected. Changing the `≤ 13` threshold globally kept the whole repo
+green.
+
+**Result (global threshold sweep, `test/uniswap-v4 --per-scenario`):** reducing
+the budget is *monotonically worse*, not better —
+- `13` (baseline): swapExactInputNoTick 60332.
+- `6`: 60437 (+105); broad small regressions (25 rows), total +1763.
+- `1` (near-zero inlining): **70715 (+10383)**; all 44 rows regress, total +215k.
+
+**Diagnosis (decisive):** at threshold 1 the PoolSwap trace still shows
+**MSTORE count = 563 (identical to baseline)**, MLOAD 741 — i.e. the same ~637
+bindings spill even with near-zero inlining. The spill is dominated by the main
+function bodies' *own* locals (solc's unoptimized IR emits functions with very
+large local sets), not by inlined helpers. Less inlining therefore cannot shrink
+the spill; it only removes the beneficial helper-chain collapse and adds
+call-protocol gas. The `≤ 13` gate is already near-optimal.
+
+**Consequence for the campaign:** the Pool* spill count is intrinsic to
+per-function local pressure. Reducing it would require shrinking a single
+function body's live-local set — e.g. mem2reg/liveness-narrowing of the main
+body, or splitting solc's mega-functions — not tuning inlining or spill-victim
+selection.
