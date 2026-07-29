@@ -379,7 +379,10 @@ theorem symStep_op (s : SymState) (yop : Op) :
       (match pureArity yop with
        | some k =>
            some { stack := .app yop ((pad s k).stack.take k) :: (pad s k).stack.drop k,
-                  inputs := (pad s k).inputs }
+                  inputs := (pad s k).inputs,
+                  opExposed := ((pad s k).stack.take k).filterMap
+                      (fun t => match t with | .inp i => some i | _ => none)
+                    ++ (pad s k).opExposed }
        | none => none) := rfl
 
 theorem symStep_label (s : SymState) (l : Label) : symStep s (.label l) = none := rfl
@@ -574,7 +577,7 @@ theorem symExec_sound [model : ExternalModel] {prog : List Asm}
       ⟨w ++ c, words ι ++ REST, yst⟩
       ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩ := by
   have hrun := symExec_run (prog := prog) (model := model) yst ι REST w
-    { stack := [], inputs := 0 } s c h (le_of_eq hlen.symm)
+    { stack := [], inputs := 0, opExposed := [] } s c h (le_of_eq hlen.symm)
   simp only [realizeStack_nil, List.drop_zero, List.nil_append] at hrun
   rw [show s.inputs = ι.length from hlen.symm, List.drop_length, words_nil,
     List.append_nil] at hrun
@@ -601,7 +604,7 @@ theorem symExec_sound_pad [model : ExternalModel] {prog : List Asm}
       ⟨w ++ c, words ι ++ REST, yst⟩
       ⟨c, realizeStack yst ι s.stack ++ words (List.drop s.inputs ι) ++ REST, yst⟩ := by
   have hrun := symExec_run (prog := prog) (model := model) yst ι REST w
-    { stack := [], inputs := 0 } s c h hle
+    { stack := [], inputs := 0, opExposed := [] } s c h hle
   simpa only [realizeStack_nil, List.drop_zero, List.nil_append] using hrun
 
 /-! ### Translation-validation corollaries
@@ -643,14 +646,6 @@ theorem Term.beqList_eq : ∀ {a b : List Term}, Term.beqList a b = true → a =
   | _ :: _, [], h => Bool.noConfusion h
 end
 
-/-- An accepted candidate has the identical symbolic state. -/
-theorem symStateBeq_eq {a b : SymState} (h : symStateBeq a b = true) : a = b := by
-  rw [symStateBeq, Bool.and_eq_true] at h
-  obtain ⟨hi, hs⟩ := h
-  have hi' : a.inputs = b.inputs := eq_of_beq hi
-  have hs' : a.stack = b.stack := Term.beqList_eq hs
-  cases a; cases b; simp_all
-
 /-- **Translation validation.** Two windows with the same `symExec` result have
 the *same* net transformation on every suitable concrete stack — they reach an
 identical endpoint. Hence they are interchangeable inside any program. -/
@@ -665,37 +660,103 @@ theorem schedule_equiv [model : ExternalModel] {prog : List Asm}
         ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩ :=
   ⟨symExec_sound hw ι hlen REST yst c, symExec_sound hw' ι hlen REST yst c⟩
 
-/-- The gate makes `optimizeWindow` preserve the symbolic state. -/
-theorem optimizeWindow_symExec {w : List Asm} {s : SymState} (hw : symExec w = some s) :
-    symExec (optimizeWindow w) = some s := by
+/-- Realizing the identity-leaf block `pad` appends: it is the corresponding
+slice of `ι` (as words). -/
+theorem realizeStack_idLeaves (yst : EvmState) (ι : List U256) (base m : Nat)
+    (h : base + m ≤ ι.length) :
+    realizeStack yst ι ((List.range m).map (fun j => Term.inp (base + j)))
+      = words (List.take m (List.drop base ι)) := by
+  rw [realizeStack, realizeList_eq_map, List.map_map,
+    show ((realize yst ι) ∘ fun j => Term.inp (base + j))
+        = (fun j => ι.getD (base + j) 0) from by funext j; rfl,
+    range_map_getD ι base m h]
+
+/-- **`symStateEquiv` is net-transform equality.** Two symbolic states the gate
+deems `symStateEquiv` induce the *same* concrete transform on any word stack that
+supplies at least `max a.inputs b.inputs` slots: the reached outputs realize
+equally and the deeper `ι`/`REST` pass through identically. -/
+theorem symStateEquiv_transform_eq {a b : SymState} (h : symStateEquiv a b = true)
+    (yst : EvmState) (ι : List U256) (hK : Nat.max a.inputs b.inputs ≤ ι.length)
+    (REST : List AVal) :
+    realizeStack yst ι a.stack ++ words (List.drop a.inputs ι) ++ REST
+      = realizeStack yst ι b.stack ++ words (List.drop b.inputs ι) ++ REST := by
+  set K := Nat.max a.inputs b.inputs with hKdef
+  have hle_a : a.inputs ≤ K := Nat.le_max_left _ _
+  have hle_b : b.inputs ≤ K := Nat.le_max_right _ _
+  have hpad : a.stack ++ (List.range (K - a.inputs)).map (fun j => Term.inp (a.inputs + j))
+            = b.stack ++ (List.range (K - b.inputs)).map (fun j => Term.inp (b.inputs + j)) := by
+    apply Term.beqList_eq
+    unfold symStateEquiv at h
+    simpa [hKdef] using h
+  have hr : realizeStack yst ι a.stack ++ words (List.take (K - a.inputs) (List.drop a.inputs ι))
+          = realizeStack yst ι b.stack ++ words (List.take (K - b.inputs) (List.drop b.inputs ι)) := by
+    have e := congrArg (realizeStack yst ι) hpad
+    rw [realizeStack_append, realizeStack_append,
+      realizeStack_idLeaves yst ι a.inputs (K - a.inputs) (by omega),
+      realizeStack_idLeaves yst ι b.inputs (K - b.inputs) (by omega)] at e
+    exact e
+  have expand : ∀ m, m ≤ K →
+      words (List.drop m ι) = words (List.take (K - m) (List.drop m ι)) ++ words (List.drop K ι) := by
+    intro m hm
+    conv_lhs => rw [← List.take_append_drop (K - m) (List.drop m ι)]
+    rw [words_append, List.drop_drop, show m + (K - m) = K from by omega]
+  rw [expand a.inputs hle_a, expand b.inputs hle_b]
+  simp only [← List.append_assoc]
+  rw [hr]
+
+/-- The gate-fold spec: `optimizeWindow w` is either the original `w`, or a
+candidate that is `symStateEquiv` to `target`, has `opExposed ⊆ target.opExposed`,
+and does not grow bytes. This is all soundness needs from the untrusted fold. -/
+theorem optimizeWindow_spec {w : List Asm} {target : SymState}
+    (hw : symExec w = some target) :
+    optimizeWindow w = w ∨
+      ∃ tcand, symExec (optimizeWindow w) = some tcand
+        ∧ symStateEquiv tcand target = true
+        ∧ (∀ i ∈ tcand.opExposed, i ∈ target.opExposed)
+        ∧ codeSize (optimizeWindow w) ≤ codeSize w := by
   unfold optimizeWindow
   split
-  · exact hw
+  · exact Or.inl rfl
   · rw [hw]
     dsimp only
     split
-    · exact hw
-    · split
-      · exact hw
+    · exact Or.inl rfl
+    · refine List.foldlRecOn (motive := fun best => best = w ∨
+          ∃ tcand, symExec best = some tcand ∧ symStateEquiv tcand target = true
+            ∧ (∀ i ∈ tcand.opExposed, i ∈ target.opExposed) ∧ codeSize best ≤ codeSize w)
+        _ _ (Or.inl rfl) ?_
+      intro best hbest cand _hcand
+      split
       · split
-        · rename_i tcand htcand
-          split
-          · rename_i hgate
-            rw [Bool.and_eq_true, Bool.and_eq_true] at hgate
-            obtain ⟨⟨hbeq, -⟩, -⟩ := hgate
-            rw [htcand, symStateBeq_eq hbeq]
-          · exact hw
-        · exact hw
+        · rename_i tcand hc hgate
+          rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at hgate
+          obtain ⟨⟨⟨heq, hsub⟩, -⟩, hcs⟩ := hgate
+          exact Or.inr ⟨tcand, hc, heq,
+            fun i hi => of_decide_eq_true (List.all_eq_true.mp hsub i hi), of_decide_eq_true hcs⟩
+        · exact hbest
+      · exact hbest
 
-/-- **Window optimization is sound.** Whatever the untrusted scheduler emitted,
-`optimizeWindow w` has exactly `w`'s net transformation. -/
+/-- **Window optimization is sound** (against the `symStateEquiv` + `opExposed`
+gate). Whatever the untrusted scheduler emitted, `optimizeWindow w` has exactly
+`w`'s net transformation over any word stack deep enough for both the original
+reach (`target.inputs`) and the optimized window's own reach (`hcand`). The
+`symStateEquiv` gate can admit a candidate reaching *deeper* than the original
+(leaving the extra slots as identities), so the depth bound is on the optimized
+window; the whole-program bridge supplies it from the actual runtime stack. -/
 theorem optimizeWindow_equiv [model : ExternalModel] {prog : List Asm}
-    {w : List Asm} {s : SymState} (hw : symExec w = some s)
-    (ι : List U256) (hlen : ι.length = s.inputs) (REST : List AVal)
-    (yst : EvmState) (c : List Asm) :
+    {w : List Asm} {target : SymState} (hw : symExec w = some target)
+    (ι : List U256) (hle : target.inputs ≤ ι.length)
+    (hcandLe : ∀ tcand, symExec (optimizeWindow w) = some tcand → tcand.inputs ≤ ι.length)
+    (REST : List AVal) (yst : EvmState) (c : List Asm) :
     ASteps (model := model) prog ⟨optimizeWindow w ++ c, words ι ++ REST, yst⟩
-      ⟨c, realizeStack yst ι s.stack ++ REST, yst⟩ :=
-  symExec_sound (optimizeWindow_symExec hw) ι hlen REST yst c
+      ⟨c, realizeStack yst ι target.stack ++ words (List.drop target.inputs ι) ++ REST, yst⟩ := by
+  rcases optimizeWindow_spec hw with hopt | ⟨tcand, htc, heq, -, -⟩
+  · rw [hopt]; exact symExec_sound_pad hw ι hle REST yst c
+  · have hti : tcand.inputs ≤ ι.length := hcandLe tcand htc
+    have hKle : Nat.max tcand.inputs target.inputs ≤ ι.length := Nat.max_le.mpr ⟨hti, hle⟩
+    have hc := symExec_sound_pad (prog := prog) (model := model) htc ι hti REST yst c
+    rw [symStateEquiv_transform_eq heq yst ι hKle REST] at hc
+    exact hc
 
 /-! ### Structural preservation by `scheduleAsm`
 
@@ -830,7 +891,16 @@ when it symbolically executes). -/
 theorem optimizeWindow_all_schedulable {w : List Asm}
     (hw : ∀ i ∈ w, schedulable i = true) : ∀ i ∈ optimizeWindow w, schedulable i = true := by
   obtain ⟨s, hs⟩ := Option.isSome_iff_exists.mp (symExec_isSome_of_schedulable hw)
-  exact foldlM_all_schedulable (optimizeWindow w) (optimizeWindow_symExec hs)
+  have hos : symExec (optimizeWindow w) = some s ∨
+      ∃ tcand, symExec (optimizeWindow w) = some tcand := by
+    rcases optimizeWindow_spec hs with h | ⟨tc, htc, -⟩
+    · exact Or.inl (by rw [h]; exact hs)
+    · exact Or.inr ⟨tc, htc⟩
+  obtain ⟨t, ht⟩ : ∃ t, symExec (optimizeWindow w) = some t := by
+    rcases hos with h | h
+    · exact ⟨s, h⟩
+    · exact h
+  exact foldlM_all_schedulable (optimizeWindow w) ht
 
 theorem labelDefs_optimizeWindow {w : List Asm} (hw : ∀ i ∈ w, schedulable i = true) :
     labelDefs (optimizeWindow w) = [] :=
@@ -845,13 +915,24 @@ theorem labelRefs_optimizeWindow {w : List Asm} (hw : ∀ i ∈ w, schedulable i
 theorem codeSize_optimizeWindow_le (w : List Asm) :
     codeSize (optimizeWindow w) ≤ codeSize w := by
   unfold optimizeWindow
-  repeat' split
-  all_goals
-    first
-      | exact Nat.le_refl _
-      | (rename_i hgate
-         rw [Bool.and_eq_true, Bool.and_eq_true] at hgate
-         exact of_decide_eq_true hgate.2)
+  split
+  · exact Nat.le_refl _
+  · cases symExec w with
+    | none => exact Nat.le_refl _
+    | some target =>
+      dsimp only
+      split
+      · exact Nat.le_refl _
+      · refine List.foldlRecOn (motive := fun best => codeSize best ≤ codeSize w)
+          _ _ (Nat.le_refl _) ?_
+        intro best hbest cand _hcand
+        split
+        · split
+          · rename_i tcand hc hgate
+            rw [Bool.and_eq_true] at hgate
+            exact of_decide_eq_true hgate.2
+          · exact hbest
+        · exact hbest
 
 /-- Every element of a `takeWhile schedulable` prefix is admissible. -/
 theorem takeWhile_all_schedulable : ∀ (p : List Asm),
@@ -869,18 +950,37 @@ theorem takeWhile_all_schedulable : ∀ (p : List Asm),
       · exact ih i hi
     · exact absurd hi (by simp)
 
-/-- Dropping the admissible prefix keeps the label definitions. -/
-theorem labelDefs_dropWhile_schedulable (p : List Asm) :
-    labelDefs (p.dropWhile schedulable) = labelDefs p := by
-  conv_rhs => rw [← List.takeWhile_append_dropWhile (p := schedulable) (l := p)]
-  rw [labelDefs_append, labelDefs_eq_nil_of_schedulable (takeWhile_all_schedulable p),
-    List.nil_append]
+/-- `cutLen` never exceeds the (nonempty) run it cuts. -/
+theorem cutLen_le {run : List Asm} (h : 0 < run.length) : cutLen run ≤ run.length := by
+  unfold cutLen
+  have hcap : Nat.min run.length maxWindowLen ≤ run.length := Nat.min_le_left _ _
+  have hcap1 : 1 ≤ Nat.min run.length maxWindowLen := Nat.le_min.mpr ⟨h, by decide⟩
+  dsimp only
+  split
+  · rename_i j hj
+    have hmap := (List.mem_filter.mp (List.mem_of_getLast? hj)).1
+    obtain ⟨k, hk, rfl⟩ := List.mem_map.mp hmap
+    have := List.mem_range.mp hk
+    omega
+  · exact Nat.max_le.mpr ⟨h, hcap⟩
 
-theorem labelRefs_dropWhile_schedulable (p : List Asm) :
-    labelRefs (p.dropWhile schedulable) = labelRefs p := by
-  conv_rhs => rw [← List.takeWhile_append_dropWhile (p := schedulable) (l := p)]
-  rw [labelRefs_append, labelRefs_eq_nil_of_schedulable (takeWhile_all_schedulable p),
-    List.nil_append]
+/-- The window `scheduleAsmFuel` cuts (`run.take (cutLen run)`, `run` the maximal
+admissible prefix) and the tail it recurses on recombine to the original. -/
+theorem window_split (i : Asm) (rest : List Asm) (hi : schedulable i = true) :
+    ((i :: rest).takeWhile schedulable).take (cutLen ((i :: rest).takeWhile schedulable))
+        ++ (i :: rest).drop (cutLen ((i :: rest).takeWhile schedulable)) = i :: rest := by
+  set run := (i :: rest).takeWhile schedulable with hrun
+  have hne : 0 < run.length := by rw [hrun, List.takeWhile_cons_of_pos hi]; simp
+  have hlen := cutLen_le hne
+  obtain ⟨t, ht⟩ := List.takeWhile_prefix (l := i :: rest) schedulable
+  rw [← hrun] at ht
+  rw [← ht, List.drop_append_of_le_length hlen, ← List.append_assoc, List.take_append_drop]
+
+/-- The cut window is all-admissible (a prefix of the `takeWhile` run). -/
+theorem window_all_sched (i : Asm) (rest : List Asm) :
+    ∀ x ∈ ((i :: rest).takeWhile schedulable).take
+        (cutLen ((i :: rest).takeWhile schedulable)), schedulable x = true :=
+  fun x hx => takeWhile_all_schedulable _ x (List.mem_of_mem_take hx)
 
 /-- `scheduleAsmFuel` preserves the defined labels. -/
 theorem labelDefs_scheduleAsmFuel : ∀ (fuel : Nat) (p : List Asm),
@@ -895,8 +995,13 @@ theorem labelDefs_scheduleAsmFuel : ∀ (fuel : Nat) (p : List Asm),
     | cons i rest =>
       rw [scheduleAsmFuel]
       split
-      · rw [labelDefs_append, labelDefs_optimizeWindow (takeWhile_all_schedulable _), ih,
-          List.nil_append, labelDefs_dropWhile_schedulable]
+      · rename_i hi
+        dsimp only
+        rw [labelDefs_append, labelDefs_optimizeWindow (window_all_sched i rest), ih,
+          List.nil_append]
+        conv_rhs => rw [← window_split i rest hi]
+        rw [labelDefs_append, labelDefs_eq_nil_of_schedulable (window_all_sched i rest),
+          List.nil_append]
       · rw [labelDefs_cons, ih, ← labelDefs_cons]
 
 theorem labelRefs_scheduleAsmFuel : ∀ (fuel : Nat) (p : List Asm),
@@ -911,8 +1016,13 @@ theorem labelRefs_scheduleAsmFuel : ∀ (fuel : Nat) (p : List Asm),
     | cons i rest =>
       rw [scheduleAsmFuel]
       split
-      · rw [labelRefs_append, labelRefs_optimizeWindow (takeWhile_all_schedulable _), ih,
-          List.nil_append, labelRefs_dropWhile_schedulable]
+      · rename_i hi
+        dsimp only
+        rw [labelRefs_append, labelRefs_optimizeWindow (window_all_sched i rest), ih,
+          List.nil_append]
+        conv_rhs => rw [← window_split i rest hi]
+        rw [labelRefs_append, labelRefs_eq_nil_of_schedulable (window_all_sched i rest),
+          List.nil_append]
       · rw [labelRefs_cons, ih, ← labelRefs_cons]
 
 theorem codeSize_scheduleAsmFuel_le : ∀ (fuel : Nat) (p : List Asm),
@@ -927,14 +1037,19 @@ theorem codeSize_scheduleAsmFuel_le : ∀ (fuel : Nat) (p : List Asm),
     | cons i rest =>
       rw [scheduleAsmFuel]
       split
-      · rw [codeSize_append]
-        calc codeSize (optimizeWindow ((i :: rest).takeWhile schedulable))
-              + codeSize (scheduleAsmFuel fuel ((i :: rest).dropWhile schedulable))
-            ≤ codeSize ((i :: rest).takeWhile schedulable)
-              + codeSize ((i :: rest).dropWhile schedulable) :=
-              Nat.add_le_add (codeSize_optimizeWindow_le _) (ih _)
-          _ = codeSize (i :: rest) := by
-              rw [← codeSize_append, List.takeWhile_append_dropWhile]
+      · rename_i hi
+        dsimp only
+        rw [codeSize_append]
+        have h1 := codeSize_optimizeWindow_le
+          (((i :: rest).takeWhile schedulable).take
+            (cutLen ((i :: rest).takeWhile schedulable)))
+        have h2 := ih ((i :: rest).drop (cutLen ((i :: rest).takeWhile schedulable)))
+        have h3 : codeSize (((i :: rest).takeWhile schedulable).take
+              (cutLen ((i :: rest).takeWhile schedulable)))
+            + codeSize ((i :: rest).drop (cutLen ((i :: rest).takeWhile schedulable)))
+            = codeSize (i :: rest) := by
+          rw [← codeSize_append, window_split i rest hi]
+        omega
       · rw [codeSize_cons, codeSize_cons]
         exact Nat.add_le_add (Nat.le_refl _) (ih rest)
 
