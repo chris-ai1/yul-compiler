@@ -706,13 +706,15 @@ theorem symStateEquiv_transform_eq {a b : SymState} (h : symStateEquiv a b = tru
 
 /-- The gate-fold spec: `optimizeWindow w` is either the original `w`, or a
 candidate that is `symStateEquiv` to `target`, has `opExposed ⊆ target.opExposed`,
-and does not grow bytes. This is all soundness needs from the untrusted fold. -/
+reaches no deeper (`tcand.inputs ≤ target.inputs`), and does not grow bytes. This
+is all soundness needs from the untrusted fold. -/
 theorem optimizeWindow_spec {w : List Asm} {target : SymState}
     (hw : symExec w = some target) :
     optimizeWindow w = w ∨
       ∃ tcand, symExec (optimizeWindow w) = some tcand
         ∧ symStateEquiv tcand target = true
         ∧ (∀ i ∈ tcand.opExposed, i ∈ target.opExposed)
+        ∧ tcand.inputs ≤ target.inputs
         ∧ codeSize (optimizeWindow w) ≤ codeSize w := by
   unfold optimizeWindow
   split
@@ -723,36 +725,36 @@ theorem optimizeWindow_spec {w : List Asm} {target : SymState}
     · exact Or.inl rfl
     · refine List.foldlRecOn (motive := fun best => best = w ∨
           ∃ tcand, symExec best = some tcand ∧ symStateEquiv tcand target = true
-            ∧ (∀ i ∈ tcand.opExposed, i ∈ target.opExposed) ∧ codeSize best ≤ codeSize w)
+            ∧ (∀ i ∈ tcand.opExposed, i ∈ target.opExposed)
+            ∧ tcand.inputs ≤ target.inputs ∧ codeSize best ≤ codeSize w)
         _ _ (Or.inl rfl) ?_
       intro best hbest cand _hcand
       split
       · split
         · rename_i tcand hc hgate
-          rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at hgate
-          obtain ⟨⟨⟨heq, hsub⟩, -⟩, hcs⟩ := hgate
+          rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at hgate
+          obtain ⟨⟨⟨⟨heq, hsub⟩, hinp⟩, -⟩, hcs⟩ := hgate
           exact Or.inr ⟨tcand, hc, heq,
-            fun i hi => of_decide_eq_true (List.all_eq_true.mp hsub i hi), of_decide_eq_true hcs⟩
+            fun i hi => of_decide_eq_true (List.all_eq_true.mp hsub i hi),
+            of_decide_eq_true hinp, of_decide_eq_true hcs⟩
         · exact hbest
       · exact hbest
 
-/-- **Window optimization is sound** (against the `symStateEquiv` + `opExposed`
-gate). Whatever the untrusted scheduler emitted, `optimizeWindow w` has exactly
-`w`'s net transformation over any word stack deep enough for both the original
-reach (`target.inputs`) and the optimized window's own reach (`hcand`). The
-`symStateEquiv` gate can admit a candidate reaching *deeper* than the original
-(leaving the extra slots as identities), so the depth bound is on the optimized
-window; the whole-program bridge supplies it from the actual runtime stack. -/
+/-- **Window optimization is sound** (against the `symStateEquiv` + `opExposed` +
+`inputs`-monotone gate). Whatever the untrusted scheduler emitted,
+`optimizeWindow w` has exactly `w`'s net transformation over any word stack deep
+enough for the original reach; the `tcand.inputs ≤ target.inputs` gate conjunct
+means the optimized window reaches no deeper, so `target.inputs ≤ ι.length`
+suffices. -/
 theorem optimizeWindow_equiv [model : ExternalModel] {prog : List Asm}
     {w : List Asm} {target : SymState} (hw : symExec w = some target)
     (ι : List U256) (hle : target.inputs ≤ ι.length)
-    (hcandLe : ∀ tcand, symExec (optimizeWindow w) = some tcand → tcand.inputs ≤ ι.length)
     (REST : List AVal) (yst : EvmState) (c : List Asm) :
     ASteps (model := model) prog ⟨optimizeWindow w ++ c, words ι ++ REST, yst⟩
       ⟨c, realizeStack yst ι target.stack ++ words (List.drop target.inputs ι) ++ REST, yst⟩ := by
-  rcases optimizeWindow_spec hw with hopt | ⟨tcand, htc, heq, -, -⟩
+  rcases optimizeWindow_spec hw with hopt | ⟨tcand, htc, heq, -, hinp, -⟩
   · rw [hopt]; exact symExec_sound_pad hw ι hle REST yst c
-  · have hti : tcand.inputs ≤ ι.length := hcandLe tcand htc
+  · have hti : tcand.inputs ≤ ι.length := le_trans hinp hle
     have hKle : Nat.max tcand.inputs target.inputs ≤ ι.length := Nat.max_le.mpr ⟨hti, hle⟩
     have hc := symExec_sound_pad (prog := prog) (model := model) htc ι hti REST yst c
     rw [symStateEquiv_transform_eq heq yst ι hKle REST] at hc
