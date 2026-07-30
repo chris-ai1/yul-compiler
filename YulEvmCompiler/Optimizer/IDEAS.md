@@ -1391,3 +1391,41 @@ loop writes, which likely compile through the **main** (non-spill) arm — untes
 here (a full aave run exceeded the measurement budget on a cold solc cache). If
 revisited: wire `eqObject` into the main arm too and measure aave; that is where
 the refund-neutral identity-`sstore` elimination could actually pay off.
+
+### 🏁 Pool* spill-gas front — closure note
+
+Campaign result on `test/uniswap-v4` PoolSwap: rematerialize-before-spill cut the
+spill count 637 → 232 and −10,816 gas suite-wide; covered-before-read store
+elimination added −632; both are def-only, exact-state-preserving, 0 regressions.
+A pick-smaller-compiled-code heuristic chooses per-object between the remat'd and
+plain spill (remat's loop recomputes are dynamically worse on a few array-copy
+fixtures — measured `array_copy_nested_array` +15k, fixed by the heuristic).
+
+**Residue diagnosis** (`swapExactInputNoTick` 54b7df13, ours 55,195 vs solc
+44,284, gap ~10.9k): spill round-trips (a) ~4–5k (MLOAD +1,071, MSTORE +844,
+~1,900 slot-address PUSHes); stack shuffle (b) ~3k (DUP/SWAP/POP scaffolding);
+call/JUMP (c) ~1.8k (295 vs 73 — solc inlines ~111 more calls); SLOAD only +200;
+arithmetic ~0. The gap is structural and spread — no hot PC.
+
+**Why (a) is not tractable def-only:** the 232 residual spills are call-results
+and mutated accumulators; the dominant residual store shape
+(`mstore(K, mload(S))` ×56) shuffles **call-result** values between spill slots,
+which no content-fact pass (ReuseValues/MemoryForward) can forward, and the
+visible redundancy (same `FN(x)` stored twice) can't be CSE'd without
+interprocedural purity. Each tractable sub-attack (mload-forwarding, remat-mload
+extension) is <2k and carries the same dynamic-regression risk.
+
+**Cold-path outlining — sized, rejected.** Probe (semantics-breaking scaffold,
+not shipped): stub every revert/invalid-ending cold block (removing its locals),
+re-spill, trace the hot path. Hot-path gas **55,195 → 55,267 (noise)**, MLOAD/
+MSTORE unchanged — while runtime code size dropped 27,232 → 25,161. So the 232
+spills are **hot-path-live, not cold-path artifacts**; outlining reverts (which
+solc does — its 7,756-byte runtime uses shared revert helpers) shrinks **code
+size only**, saving ~0 on the hot path (far below the 3k bar). Rejected.
+
+**Front status: closed for source-tier def-only work.** The −11.4k captured the
+big structural win (spill count). The remaining ~11k is spill round-trips + stack
+shuffle + call overhead that the source tier cannot reduce further without either
+(i) a better spill allocator inside the proven `MemorySpill*` machinery, or
+(ii) the Asm-tier **window scheduler** (the DUP/SWAP/POP bucket) — the only
+remaining lever, tracked on its own branch.
