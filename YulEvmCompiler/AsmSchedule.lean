@@ -415,6 +415,7 @@ def optimizeWindow (w : List Asm) : List Asm :=
         | some tcand =>
             if symStateEquiv tcand target
                 && tcand.opExposed.all (· ∈ target.opExposed)
+                && tcand.inputs ≤ target.inputs
                 && windowGas cand < windowGas best
                 && codeSize cand ≤ codeSize w then cand else best
         | none => best) w
