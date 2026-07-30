@@ -1254,6 +1254,212 @@ theorem foldlM_opExposed_sub : ∀ (ws : List Asm) {s0 s : SymState},
     obtain ⟨s1, h1, h2⟩ := Option.bind_eq_some_iff.mp h
     exact fun x hx => ih h2 x (symStep_opExposed_sub h1 x hx)
 
+
+/-! ### AVal per-instruction packages and executor soundness -/
+
+theorem list_eq_words_avalWord : ∀ {L : List AVal},
+    (∀ a ∈ L, isWordA a) → L = words (L.map avalWord)
+  | [], _ => rfl
+  | a :: L, h => by
+      rw [List.map_cons, words_cons, word_avalWord (h a List.mem_cons_self)]
+      congr 1
+      exact list_eq_words_avalWord (fun x hx => h x (List.mem_cons_of_mem _ hx))
+
+theorem astep_dup_realize_A [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ξ : List AVal) (tail : List AVal) (P : List Term) (n : Nat)
+    (hn16 : n < 16) (h : n < P.length) {rest : List Asm} :
+    ASteps (model := model) prog
+      ⟨.dup ⟨n, hn16⟩ :: rest, realizeListA yst ξ P ++ tail, yst⟩
+      ⟨rest, realizeA yst ξ P[n] :: (realizeListA yst ξ P ++ tail), yst⟩ := by
+  have hsrc : realizeListA yst ξ P ++ tail
+      = realizeListA yst ξ (P.take n)
+        ++ realizeA yst ξ P[n] :: (realizeListA yst ξ (P.drop (n + 1)) ++ tail) := by
+    rw [realizeStackA_split yst ξ P n h]; simp only [List.cons_append, List.append_assoc]
+  rw [hsrc]
+  exact .single (AStep.dup (n := ⟨n, hn16⟩) (v := realizeA yst ξ P[n])
+    (τ := realizeListA yst ξ (P.take n))
+    (ρ := realizeListA yst ξ (P.drop (n + 1)) ++ tail)
+    (by show (realizeListA yst ξ (P.take n)).length = n
+        rw [realizeListA_length, List.length_take]; omega))
+
+theorem astep_swap_realize_A [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ξ : List AVal) (tail : List AVal) (P : List Term) (n : Nat)
+    (hn16 : n < 16) (h : n + 1 < P.length) {rest : List Asm} :
+    ASteps (model := model) prog
+      ⟨.swap ⟨n, hn16⟩ :: rest, realizeListA yst ξ P ++ tail, yst⟩
+      ⟨rest, realizeListA yst ξ ((P.set 0 P[n + 1]).set (n + 1) P[0]) ++ tail, yst⟩ := by
+  have hτlen : (realizeListA yst ξ ((P.take (n + 1)).drop 1)).length = n := by
+    rw [realizeListA_length, List.length_drop, List.length_take]; omega
+  have hsrc : realizeListA yst ξ P ++ tail
+      = realizeA yst ξ P[0]
+        :: (realizeListA yst ξ ((P.take (n + 1)).drop 1)
+            ++ realizeA yst ξ P[n + 1] :: (realizeListA yst ξ (P.drop (n + 2)) ++ tail)) := by
+    rw [realizeStackA_split2 yst ξ P n h]; simp only [List.cons_append, List.append_assoc]
+  have htgt : realizeListA yst ξ ((P.set 0 P[n + 1]).set (n + 1) P[0]) ++ tail
+      = realizeA yst ξ P[n + 1]
+        :: (realizeListA yst ξ ((P.take (n + 1)).drop 1)
+            ++ realizeA yst ξ P[0] :: (realizeListA yst ξ (P.drop (n + 2)) ++ tail)) := by
+    rw [realizeStackA_setset, realizeStackA_split2 yst ξ P n h,
+      swap_set_eq (realizeA yst ξ P[0]) (realizeA yst ξ P[n + 1])
+        (realizeListA yst ξ ((P.take (n + 1)).drop 1))
+        (realizeListA yst ξ (P.drop (n + 2))) hτlen]
+    simp only [List.cons_append, List.append_assoc]
+  rw [hsrc, htgt]
+  exact .single (AStep.swap (n := ⟨n, hn16⟩) (a := realizeA yst ξ P[0])
+    (b := realizeA yst ξ P[n + 1])
+    (τ := realizeListA yst ξ ((P.take (n + 1)).drop 1))
+    (ρ := realizeListA yst ξ (P.drop (n + 2)) ++ tail) hτlen)
+
+theorem astep_op_realize_A [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ξ : List AVal) (tail : List AVal) (P : List Term) (yop : Op)
+    (k : Nat) (hpa : pureArity yop = some k) (hk : k ≤ P.length)
+    (hwords : ∀ i ∈ bareInps (P.take k), isWordA (ξ.getD i (.word 0))) {rest : List Asm} :
+    ASteps (model := model) prog
+      ⟨.op yop :: rest, realizeListA yst ξ P ++ tail, yst⟩
+      ⟨rest, realizeListA yst ξ (.app yop (P.take k) :: P.drop k) ++ tail, yst⟩ := by
+  have hallword : ∀ a ∈ realizeListA yst ξ (P.take k), isWordA a := by
+    intro a ha
+    rw [realizeListA_eq_map, List.mem_map] at ha
+    obtain ⟨t, htm, rfl⟩ := ha
+    cases t with
+    | inp i => exact hwords i (List.mem_filterMap.mpr ⟨.inp i, htm, rfl⟩)
+    | lit v => exact ⟨v, rfl⟩
+    | app o a => exact ⟨_, rfl⟩
+  set args := (realizeListA yst ξ (P.take k)).map avalWord with hargs
+  have hwordsList : realizeListA yst ξ (P.take k) = words args := by
+    rw [hargs]; exact list_eq_words_avalWord hallword
+  have hargk : args.length = k := by
+    rw [hargs, List.length_map, realizeListA_length, List.length_take]; omega
+  have hsrc : realizeListA yst ξ P ++ tail
+      = words args ++ (realizeListA yst ξ (P.drop k) ++ tail) := by
+    conv_lhs => rw [← List.take_append_drop k P, realizeListA_append]
+    rw [List.append_assoc, hwordsList]
+  have htgt : realizeListA yst ξ (.app yop (P.take k) :: P.drop k) ++ tail
+      = .word (realizeOp yop args yst) :: (realizeListA yst ξ (P.drop k) ++ tail) := by
+    rw [realizeListA_cons, realizeA, ← hargs, List.cons_append]
+  rw [hsrc, htgt]
+  have hbp := builtin_pure model.calls model.creates yop yst (by rw [hargk]; exact hpa)
+  have hstep := AStep.op (model := model) (prog := prog) (yop := yop) (args := args)
+    (rets := [realizeOp yop args yst]) (c := rest)
+    (σ := realizeListA yst ξ (P.drop k) ++ tail) (yst := yst) (yst' := yst) hbp
+  simpa [words] using ASteps.single hstep
+
+/-- One symbolic step is sound over an `AVal` valuation, provided the (final)
+`opExposed` slots are words. -/
+theorem symStep_sound_AVal [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ξ : List AVal) (REST : List AVal)
+    {s0 s1 : SymState} {i : Asm} {rest : List Asm}
+    (hstep : symStep s0 i = some s1) (hle : s1.inputs ≤ ξ.length)
+    (hop : ∀ i ∈ s1.opExposed, isWordA (ξ.getD i (.word 0))) :
+    ASteps (model := model) prog
+      ⟨i :: rest, realizeListA yst ξ s0.stack ++ List.drop s0.inputs ξ ++ REST, yst⟩
+      ⟨rest, realizeListA yst ξ s1.stack ++ List.drop s1.inputs ξ ++ REST, yst⟩ := by
+  cases i with
+  | push v =>
+    rw [symStep_push, Option.some.injEq] at hstep
+    subst hstep
+    simp only [realizeListA_cons, realizeA, List.cons_append]
+    exact .single AStep.push
+  | pop =>
+    rw [symStep_pop, Option.some.injEq] at hstep
+    subst hstep
+    dsimp only
+    have hle' : (pad s0 1).inputs ≤ ξ.length := hle
+    rw [← pad_conc_A yst ξ REST s0 1 hle']
+    obtain ⟨x, xs, hxs⟩ : ∃ x xs, (pad s0 1).stack = x :: xs := by
+      have := pad_len s0 1
+      match hp : (pad s0 1).stack with
+      | [] => rw [hp] at this; simp at this
+      | y :: ys => exact ⟨y, ys, rfl⟩
+    rw [hxs]
+    simp only [realizeListA_cons, List.drop_succ_cons, List.drop_zero, List.cons_append]
+    exact .single AStep.pop
+  | dup m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl : n + 1 ≤ (pad s0 (n + 1)).stack.length := pad_len s0 (n + 1)
+    have hnth : (pad s0 (n + 1)).stack[n]? = some ((pad s0 (n + 1)).stack[n]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    rw [symStep_dup, hnth, Option.some.injEq] at hstep
+    have hle' : (pad s0 (n + 1)).inputs ≤ ξ.length := by rw [← hstep] at hle; exact hle
+    rw [← hstep]
+    dsimp only
+    rw [← pad_conc_A yst ξ REST s0 (n + 1) hle']
+    set P := (pad s0 (n + 1)).stack with hP
+    rw [realizeListA_cons, List.append_assoc, List.append_assoc]
+    exact astep_dup_realize_A yst ξ (List.drop (pad s0 (n + 1)).inputs ξ ++ REST) P n hn
+      (by omega)
+  | swap m =>
+    obtain ⟨n, hn⟩ := m
+    have hpl : n + 2 ≤ (pad s0 (n + 2)).stack.length := pad_len s0 (n + 2)
+    have hnth0 : (pad s0 (n + 2)).stack[0]? = some ((pad s0 (n + 2)).stack[0]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    have hnth1 : (pad s0 (n + 2)).stack[n + 1]? = some ((pad s0 (n + 2)).stack[n + 1]'(by omega)) :=
+      List.getElem?_eq_getElem (by omega)
+    rw [symStep_swap, hnth0, hnth1, Option.some.injEq] at hstep
+    have hle' : (pad s0 (n + 2)).inputs ≤ ξ.length := by rw [← hstep] at hle; exact hle
+    rw [← hstep]
+    dsimp only
+    rw [← pad_conc_A yst ξ REST s0 (n + 2) hle']
+    set P := (pad s0 (n + 2)).stack with hP
+    rw [List.append_assoc, List.append_assoc]
+    exact astep_swap_realize_A yst ξ (List.drop (pad s0 (n + 2)).inputs ξ ++ REST) P n hn
+      (by omega)
+  | op yop =>
+    rw [symStep_op] at hstep
+    cases hpa : pureArity yop with
+    | none => rw [hpa] at hstep; simp at hstep
+    | some k =>
+      rw [hpa, Option.some.injEq] at hstep
+      have hlei : (pad s0 k).inputs ≤ ξ.length := by rw [← hstep] at hle; exact hle
+      have hopw : ∀ j ∈ bareInps ((pad s0 k).stack.take k), isWordA (ξ.getD j (.word 0)) := by
+        intro j hj
+        refine hop j ?_
+        rw [← hstep]
+        exact List.mem_append.mpr (Or.inl hj)
+      rw [← hstep]
+      dsimp only
+      rw [← pad_conc_A yst ξ REST s0 k hlei]
+      set P := (pad s0 k).stack with hP
+      rw [List.append_assoc, List.append_assoc]
+      exact astep_op_realize_A yst ξ (List.drop (pad s0 k).inputs ξ ++ REST) P yop k hpa
+        (by have := pad_len s0 k; omega) hopw
+  | label l => rw [symStep_label] at hstep; exact absurd hstep (by simp)
+  | jump l => rw [symStep_jump] at hstep; exact absurd hstep (by simp)
+  | jumpi l => rw [symStep_jumpi] at hstep; exact absurd hstep (by simp)
+  | pushLabel l => rw [symStep_pushLabel] at hstep; exact absurd hstep (by simp)
+  | dynJump => rw [symStep_dynJump] at hstep; exact absurd hstep (by simp)
+
+/-- **AVal executor soundness (run form).** Under the `opExposed`-are-words
+hypothesis on the final state, a window transforms `ξ ++ REST` exactly as its
+symbolic state prescribes — over arbitrary `AVal` (words *and* code addresses). -/
+theorem symExec_run_AVal [model : ExternalModel] {prog : List Asm}
+    (yst : EvmState) (ξ : List AVal) (REST : List AVal) :
+    ∀ (ws : List Asm) (s0 s : SymState) (c : List Asm),
+      ws.foldlM symStep s0 = some s → s.inputs ≤ ξ.length →
+      (∀ i ∈ s.opExposed, isWordA (ξ.getD i (.word 0))) →
+      ASteps (model := model) prog
+        ⟨ws ++ c, realizeListA yst ξ s0.stack ++ List.drop s0.inputs ξ ++ REST, yst⟩
+        ⟨c, realizeListA yst ξ s.stack ++ List.drop s.inputs ξ ++ REST, yst⟩ := by
+  intro ws
+  induction ws with
+  | nil =>
+    intro s0 s c h _ _
+    rw [List.foldlM_nil] at h
+    obtain rfl : s0 = s := by simpa using h
+    exact .refl _
+  | cons i ws ih =>
+    intro s0 s c h hle hop
+    rw [List.foldlM_cons] at h
+    obtain ⟨s1, h1, h2⟩ := Option.bind_eq_some_iff.mp h
+    have hle1 : s1.inputs ≤ ξ.length := le_trans (foldlM_inputs_mono ws s1 s h2) hle
+    have hop1 : ∀ i ∈ s1.opExposed, isWordA (ξ.getD i (.word 0)) :=
+      fun i hi => hop i (foldlM_opExposed_sub ws h2 i hi)
+    have hstep := symStep_sound_AVal (prog := prog) (model := model) yst ξ REST
+      (rest := ws ++ c) h1 hle1 hop1
+    have hrec := ih s1 s c h2 hle hop
+    rw [List.cons_append]
+    exact hstep.trans hrec
+
 /-! ## Remaining gap: whole-program forward simulation for `compileScheduled`
 
 What is proved here reduces the pass to the executor and discharges it:
