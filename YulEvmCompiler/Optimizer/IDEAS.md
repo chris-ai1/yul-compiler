@@ -1429,3 +1429,25 @@ shuffle + call overhead that the source tier cannot reduce further without eithe
 (i) a better spill allocator inside the proven `MemorySpill*` machinery, or
 (ii) the Asm-tier **window scheduler** (the DUP/SWAP/POP bucket) — the only
 remaining lever, tracked on its own branch.
+
+### 📏 Pure-function call CSE — sized, below threshold
+
+From the residue diagnosis: the spilled code repeats identical pure-function
+calls (e.g. `FN(fc1_60)` stored to two slots). Sizing probe (`dumpYul --purecse`):
+compute per-funDef syntactic purity by removal fixpoint (strict — a function is
+pure iff its body has only pure-arith builtins and calls only pure functions; any
+`mload`/`mstore`/`sload`/`sstore`/`keccak`/env/`msize`/call-family op ⇒ impure;
+`revert`-bearing validators are impure), then count call sites of pure functions
+with a syntactically identical earlier call in the same basic block (args'
+vars unreassigned between).
+
+**PoolSwap: 301/706 functions pure; 48 identical pure-call CSE hits;
+protocol-only ceiling 1,490 gas** (Σ 24+2·args+6·rets) + duplicate body work.
+The pure helpers are small (cleanup/mask/arith), so body work is modest (static
+ceiling ~2.2k), and this is a *static* count across all 706 functions — the
+dynamic saving on the swap hot path (what moves the 55,195) is a strict subset,
+well under 2k. **Below the 2k bar → not built.** If revisited, the build is:
+extend `ReuseValues` content facts with `f(args) ↦ x` for pure `f` (killed only
+by an arg-var reassignment, NOT by memory/storage writes — `f` is pure), so a
+later identical call rewrites to `x`; def-only wiring. Recursion/unknown callees
+stay impure; the strict no-memory rule sidesteps the `msize` hazard.
