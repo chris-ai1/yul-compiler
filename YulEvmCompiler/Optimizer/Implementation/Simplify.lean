@@ -1532,7 +1532,7 @@ def simplifyCond (c : Expr Op) (body : Block Op) : Stmt Op :=
   | .lit l => if litValue l = 0 then .block [] else .block body
   | _ =>
       match selfEqVar? c with
-      | some _ => .exprStmt (.builtin .pop [c])
+      | some x => .exprStmt (.builtin .pop [.var x])
       | none => .cond c body
 
 /-- Fold a `switch` with a literal condition to the case/default block selected
@@ -1614,7 +1614,8 @@ theorem selfEq_zero_inv {funs : FunEnv D} {V : VEnv D} {st st' : EvmState}
     {x : Ident} {cv : U256}
     (h : Step D funs V st
       (.expr (.builtin .iszero [.builtin .eq [.var x, .var x]]))
-      (.eres (.vals [cv] st'))) : cv = 0 ∧ st' = st := by
+      (.eres (.vals [cv] st'))) :
+    ∃ v, VEnv.get V x = some v ∧ cv = 0 ∧ st' = st := by
   cases h with
   | builtinOk houter hbzero =>
       cases houter with
@@ -1645,42 +1646,96 @@ theorem selfEq_zero_inv {funs : FunEnv D} {V : VEnv D} {st st' : EvmState}
                                 (calls := calls) (creates := creates)
                                 (w := 0) (by simp [pureFn, b2w]) hbzero
                               injection hzero with hvals hst
-                              exact ⟨by simpa using hvals, hst⟩
+                              exact ⟨_, hv1, by simpa using hvals, hst⟩
+
+/-- When `x` is bound, `iszero(eq(x,x))` evaluates to `0` leaving state
+unchanged — the constructor side of `selfEq_zero_inv`. -/
+theorem selfEq_eval {funs : FunEnv D} {V : VEnv D} {st : EvmState} {x : Ident} {v : U256}
+    (hv : VEnv.get V x = some v) :
+    Step D funs V st (.expr (.builtin .iszero [.builtin .eq [.var x, .var x]]))
+      (.eres (.vals [0] st)) := by
+  have h1 : b2w (v = v) = (1 : U256) := by simp [b2w]
+  have heq : Step D funs V st (.expr (.builtin .eq [.var x, .var x]))
+      (.eres (.vals [1] st)) := by
+    have hb := Step.builtinOk (funs := funs) (V := V) (st := st)
+      (Step.argsCons (Step.argsCons Step.argsNil (Step.var hv)) (Step.var hv))
+      (pureFn_builtin (op := .eq) (vs := [v, v]) (w := b2w (v = v)) (by rfl) st)
+    rwa [h1] at hb
+  have h0 : b2w ((1 : U256) = 0) = (0 : U256) := by simp [b2w]
+  have hz := Step.builtinOk (funs := funs) (V := V) (st := st)
+    (Step.argsCons Step.argsNil heq)
+    (pureFn_builtin (op := .iszero) (vs := [(1 : U256)]) (w := b2w ((1 : U256) = 0)) (by rfl) st)
+  rwa [h0] at hz
+
+/-- `iszero(eq(x,x))` never halts: variable reads have no halting derivation and
+the pure `eq`/`iszero` builtins always return `.ok`, so every branch of a
+purported halt derivation is contradictory. This makes the `if`/`pop` halt
+outcomes in `cond_selfEq_equiv` vacuous. -/
+theorem selfEq_no_halt {funs : FunEnv D} {V : VEnv D} {st st' : EvmState} {x : Ident}
+    (h : Step D funs V st
+      (.expr (.builtin .iszero [.builtin .eq [.var x, .var x]]))
+      (.eres (.halt st'))) : False := by
+  cases h with
+  | builtinHalt houter hb =>
+      obtain ⟨w, rfl, _⟩ := args_expr_value_inv houter
+      exact absurd (pureFn_builtin_inv (op := .iszero) (vs := [w]) (w := b2w (w = 0))
+        (by rfl) hb) (by simp)
+  | builtinArgsHalt houter =>
+      have he := args_expr_halt_inv houter
+      cases he with
+      | builtinHalt ha hb =>
+          cases ha with
+          | argsCons hrest hhead =>
+              cases hhead with
+              | var hvh =>
+                  cases hrest with
+                  | argsCons hnil hh2 =>
+                      cases hh2 with
+                      | var hv2 =>
+                          cases hnil
+                          exact absurd (pureFn_builtin_inv (op := .eq) (by rfl) hb) (by simp)
+      | builtinArgsHalt ha =>
+          cases ha with
+          | argsRestHalt hr =>
+              cases hr with
+              | argsRestHalt hn => cases hn
+              | argsHeadHalt hn hv => cases hv
+          | argsHeadHalt hn hv => cases hv
 
 /-- A self-equality validator branch is unreachable, but its condition must
-still be evaluated to preserve unbound-variable stuckness. `pop(condition)`
-does exactly that while deleting the branch and body. -/
+still be evaluated to preserve unbound-variable stuckness. Discarding `x`
+(`pop(x)`) does exactly that while deleting the branch, body, **and** the
+now-redundant `eq`/`iszero` cleanup — the `validator_revert` residue solc
+folds away on every value-typed calldata argument. -/
 theorem cond_selfEq_equiv (x : Ident) (body : Block Op) :
     EquivStmt D
       (.cond (.builtin .iszero [.builtin .eq [.var x, .var x]]) body)
-      (.exprStmt (.builtin .pop
-        [.builtin .iszero [.builtin .eq [.var x, .var x]]])) := by
+      (.exprStmt (.builtin .pop [.var x])) := by
   intro funs V st V' st' o
   constructor
   · intro h
     cases h with
     | ifTrue hc hnz _ =>
-        obtain ⟨rfl, -⟩ := selfEq_zero_inv hc
+        obtain ⟨v, hv, rfl, -⟩ := selfEq_zero_inv hc
         exact absurd rfl hnz
     | ifFalse hc _ =>
-        obtain ⟨rfl, rfl⟩ := selfEq_zero_inv hc
+        obtain ⟨v, hv, rfl, rfl⟩ := selfEq_zero_inv hc
         exact Step.exprStmt (Step.builtinOk
-          (Step.argsCons Step.argsNil hc) (by rfl))
-    | ifHalt hc =>
-        exact Step.exprStmtHalt
-          (Step.builtinArgsHalt (Step.argsHeadHalt Step.argsNil hc))
+          (Step.argsCons Step.argsNil (Step.var hv)) (by rfl))
+    | ifHalt hc => exact (selfEq_no_halt hc).elim
   · intro h
     cases h with
     | exprStmt hpop =>
         cases hpop with
         | builtinOk hargs hb =>
             cases hargs with
-            | argsCons hnil hc =>
+            | argsCons hnil hx =>
                 cases hnil
-                simp [evmWithExternal, builtinWithExternal, stepOp] at hb
-                subst_vars
-                obtain ⟨rfl, rfl⟩ := selfEq_zero_inv hc
-                exact Step.ifFalse hc rfl
+                cases hx with
+                | var hv =>
+                    simp [evmWithExternal, builtinWithExternal, stepOp] at hb
+                    subst_vars
+                    exact Step.ifFalse (selfEq_eval hv) rfl
     | exprStmtHalt hpop =>
         cases hpop with
         | @builtinHalt _ _ _ _ _ argvals _ _ _ hb =>
@@ -1694,9 +1749,7 @@ theorem cond_selfEq_equiv (x : Ident) (body : Block Op) :
         | builtinArgsHalt hargs =>
             cases hargs with
             | argsRestHalt hnil => cases hnil
-            | argsHeadHalt hnil hc =>
-                cases hnil
-                exact Step.ifHalt hc
+            | argsHeadHalt hnil hx => cases hx
 
 /-- A false literal `if` is exactly an empty block. -/
 theorem cond_lit_zero_equiv (l : Literal) (body : Block Op)
@@ -2265,12 +2318,12 @@ example : simplifyStmt (.cond (.lit (.number 0)) [.exprStmt (.builtin .stop [])]
 /-- A condition that folds to true selects its body. -/
 example : simplifyStmt (.cond (.builtin .add [.lit (.number 1), .lit (.number 2)])
     [.exprStmt (.builtin .stop [])]) = .block [.exprStmt (.builtin .stop [])] := rfl
--- A self-equality validator keeps condition evaluation but drops its branch.
+-- A self-equality validator drops its branch AND the redundant eq/iszero
+-- cleanup, keeping only `pop(x)` to preserve unbound-variable stuckness.
 #guard match simplifyStmt (.cond
     (.builtin .iszero [.builtin .eq [.var "x", .var "x"]])
     [.exprStmt (.builtin .revert [.lit (.number 0), .lit (.number 0)])]) with
-  | .exprStmt (.builtin .pop
-      [.builtin .iszero [.builtin .eq [.var "x", .var "x"]]]) => true
+  | .exprStmt (.builtin .pop [.var "x"]) => true
   | _ => false
 -- Equality of different variables is not assumed.
 #guard match simplifyStmt (.cond
