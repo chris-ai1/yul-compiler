@@ -1462,81 +1462,67 @@ theorem symExec_run_AVal [model : ExternalModel] {prog : List Asm}
     rw [List.cons_append]
     exact hstep.trans hrec
 
-/-! ## Remaining gap: whole-program forward simulation for `compileScheduled`
+/-! ## Status and the remaining whole-program bridge
 
-What is proved here reduces the pass to the executor and discharges it:
+**Executor + gate soundness (complete, sorry-free), over WORD and `AVal` stacks:**
 
-* `symExec_sound` — the executor is sound (the one lemma the design targets);
-* `schedule_equiv` / `optimizeWindow_equiv` — the translation-validation gate is
-  sound: an accepted window is step-equivalent to the original on every suitable
-  concrete stack;
+* `symExec_sound` / `symExec_sound_pad` — the executor is sound (word stacks; the
+  single lemma the design targets), and at any input depth `≥ s.inputs`.
+* `schedule_equiv` / `symStateEquiv_transform_eq` / `optimizeWindow_spec` /
+  `optimizeWindow_equiv` — the translation-validation gate is sound: an accepted
+  candidate is step-equivalent to the original. Re-proved against the merged
+  gate (`symStateEquiv` net-effect equality + `opExposed ⊆` + `inputs ≤`).
+* `realizeA` / `symStep_sound_AVal` / `symExec_run_AVal` — **executor soundness
+  over arbitrary `AVal` stacks** (words *and* code addresses), under the
+  hypothesis that the (final) `opExposed` slots are words. This is the piece that
+  handles code addresses in window reach (return addresses); the `opExposed`-are-
+  words hypothesis is exactly what a successful source run supplies (`AStep.op`
+  consumes `words args`).
 * `wfProg_scheduleAsm` (+ `labelDefs`/`labelRefs`/`codeSize` preservation) — the
-  label-structure/size half of `compileScheduled`: inserting `scheduleAsm` before
-  `lowerProg` keeps `WFProg`, so lowering still succeeds and the address bound
-  holds.
+  label-structure/size half of `compileScheduled`.
 
-The one remaining step to upgrade the unverified `compileScheduled`
+**The soundness subtleties (now closed by the gate).** `symExec`-equality does
+NOT imply operational equality over stacks holding code addresses:
+`w = [pop]` vs `w' = [iszero, pop]` have equal `symExec` but diverge on
+`.code L :: σ` (the op is stuck). And `symStateEquiv` (symmetric max-padding)
+would admit a candidate reaching *strictly deeper* than the original, which
+underflows a shallow stack. Compiled runs *do* put return addresses in window
+reach (`compileArgs`' `dup` past `pushLabel Lret`; the epilogue `retRot` window).
+The merged gate closes both: `opExposed(cand) ⊆ opExposed(target)` (cand's ops
+touch only inputs the original's ops did — all words on a runnable stack) and
+`tcand.inputs ≤ target.inputs` (cand reaches no deeper). `symStep_sound_AVal`
+consumes exactly the first; `optimizeWindow_equiv`/`optimizeWindow_spec` the
+second.
+
+**The one remaining step** to upgrade the unverified `compileScheduled`
 (`Compile.lean`) / `compileObjectScheduled` (`ObjectCompile.lean`) to the
-`compile`-level correctness statement is a **whole-program forward simulation**
-`scheduleAsm_asteps`/`_ahalt` in the shape of
-`Peephole.optimizeAsm_asteps`/`optimizeAsm_ahalt`, i.e. a `steps_sim` over a
-`CodeRel`-style relation on suffixes (`SchedRel`, with a `window` constructor
-pairing `w` with `optimizeWindow w`). The *control-flow* half is clean — windows
-are label/jump-free (`labelDefs_optimizeWindow`/`labelRefs_optimizeWindow`), so
-`findLabel` is preserved (a `codeRel_findLabel` analogue) and `StkRefs` carries
-over from `AsmPeepholeSound`. The *simulation* half runs into a **genuine
-soundness subtlety, not mere plumbing**, described here so it is not lost:
+`compile`-level statement is a whole-program forward simulation
+`scheduleAsm_asteps`/`_ahalt` in the exact shape of
+`Peephole.optimizeAsm_asteps`/`optimizeAsm_ahalt`: a `steps_sim` over a
+`CodeRel`-style `SchedRel` on suffixes (a `window` constructor pairing `w` with
+`optimizeWindow w`, a `keep` for non-window instructions). All per-window pieces
+are now in hand:
 
-**`symExec`-equality does NOT imply operational equality over stacks that hold
-code addresses.** Counterexample: `w = [pop]` and `w' = [op iszero, pop]` both
-have `symExec = { stack := [], inputs := 1 }` (the reached leaf `inp 0` is
-dropped either way). On a concrete stack `.code L :: σ`, `w` steps to `σ`, but
-`w'` gets **stuck** — `AStep.op` requires `words args`, and `.code L` is not a
-word. So a candidate that *drops* a reached slot via an op instead of a `pop` is
-symbolically indistinguishable yet behaviorally different when that slot is a
-code address. `symExec_sound`/`schedule_equiv`/`optimizeWindow_equiv` are
-therefore, correctly, stated over **word** stacks (`words ι`) only.
+* *Control flow.* Windows and their rewrites are label/jump-free
+  (`labelDefs_optimizeWindow`/`labelRefs_optimizeWindow`), so `findLabel` is
+  preserved (a `codeRel_findLabel` analogue over `SchedRel`) and `StkRefs`
+  carries over verbatim from `AsmPeepholeSound`.
+* *Per-window equivalence over `AVal`.* The `Match` relation carries, for a
+  mid-window state, the symbolic state `s_pre` of the consumed prefix, the
+  reached `AVal` valuation `ξ`, the invariant that the source stack is
+  `realizeListA yst ξ s_pre.stack ++ ξ.drop s_pre.inputs ++ REST`, and that
+  `opExposed s_pre` slots are words in `ξ` (accumulated as the source's op steps
+  reveal words). Each source `AStep` advances `s_pre` by one `symStep` (inverting
+  the step; the op case reveals the freshly-`opExposed` slots are words); at the
+  window boundary (`s_pre = symExec w = target`) the optimized side fires
+  `optimizeWindow w` atomically via `symExec_run_AVal` + `optimizeWindow_spec` +
+  `symStateEquiv_transform_eq` (whose `AVal` analogue is a direct mirror), using
+  the accumulated `opExposed target ⊇ opExposed tcand` words and
+  `tcand.inputs ≤ target.inputs`.
 
-This matters because compiled runs *do* put code addresses in window reach: the
-calling convention (`Compile.lean` `compileExpr`/`compileArgs`, the
-`pushLabel Lret ; push 0×k ; <args>` shape) computes arguments in a window whose
-`dup ⟨off + 1 + rets + idx⟩` reaches **past** the pushed return address
-(`.code Lret`); the function epilogue's `pop×n ; retRot k` window likewise reaches
-the return address. In the actual backend those code-address slots are always
-*preserved* (a bare `inp` leaf in the output, reproduced by any
-symbolically-equal candidate only via `dup`/`swap`, never an op) and the slots a
-window *drops* are locals (words) — so the pass is in fact sound. But that is a
-property of the **backend's stack discipline**, not of the acceptance gate: the
-gate (`symStateBeq`, or the incoming `symStateEquiv`) cannot see it.
-
-**Resolved design (Route 2 — strengthened gate, `opExposed`).** `SymState` gains
-`opExposed : List Nat`, the input indices ever passed *directly* to an op during
-`symExec`; the gate additionally requires `opExposed(candidate) ⊆
-opExposed(original)`. This makes the word-typing *compositional*:
-
-* A successful **source** run of the original window proves every
-  `opExposed(original)` slot is a word (`AStep.op` demands `words args`) — the
-  word-typing hypothesis, now recovered from the source run instead of a backend
-  invariant.
-* The candidate applies ops only to inputs in `opExposed(candidate) ⊆
-  opExposed(original)`, all words; `push`/`dup`/`swap`/`pop` are `AVal`-untyped, so
-  shuffling/dropping code addresses is safe on both sides. `AVal`-level
-  equivalence then follows from acceptance.
-* Counterexample dispatched: `w = [pop]`, `w' = [iszero, pop]` have
-  `opExposed = ∅` vs `{0}`, and `{0} ⊄ ∅`, so `w'` is rejected.
-
-Recording only *direct* bare-`inp` op-args is inductively **complete**: an `inp i`
-nested inside an arg term `app …[… inp i …]` was necessarily a direct bare arg to
-the op that first wrapped it (term-building happens only at op steps), so it was
-exposed then; `dup` merely copies exposure-status. The formal invariant to prove
-is: for every `app` subterm anywhere in `s.stack`, all its `inp` indices ∈
-`s.opExposed`.
-
-Remaining proof work, once the `opExposed` interface lands (bundled with
-`symStateEquiv`): (1) generalize `realize`/`symExec_sound` to `AVal` under the
-`opExposed`-are-words hypothesis; (2) re-prove `optimizeWindow_equiv` against
-`symStateEquiv` (net-effect, via `symExec_sound_pad`) ∧ the `opExposed ⊆` subset
-condition; (3) the source-stuttering `scheduleAsm_asteps`/`_ahalt`, firing each
-`optimizeWindow w` atomically at the window boundary via pure-`AStep`
-determinism. A `sorry` is disallowed here (`warningAsError`), so this is
-documented rather than stubbed until the interface is in place. -/
+This is a substantial but standard forward-simulation development (mirroring
+`AsmPeepholeSound`'s `Match`/`step_sim`/`steps_sim`/`halt_sim`/packaging); the
+non-standard content — that `symExec`-equality lifts to operational equality over
+code-address stacks — is exactly what `symExec_run_AVal` + the gate conjuncts
+provide, and is fully proved above. A `sorry` is disallowed here
+(`warningAsError`), so the composition is described rather than stubbed. -/
