@@ -20,55 +20,50 @@ obligation below is discharged; everything after it is mechanical.
 
 ## 0. Prerequisite (the only remaining Lean obligation)
 
-A whole-program forward simulation for `scheduleAsm`, mirroring
-`Peephole.optimizeAsm_asteps` / `optimizeAsm_ahalt`:
+**Gate is finalized.** The acceptance gate now carries the two soundness
+conjuncts (both landed / added): `opExposed(cand) ⊆ opExposed(target)` (from the
+scheduler agent) and `tcand.inputs ≤ target.inputs` (added as an INTERFACE commit
+by the proof agent — reconcile the scheduler's copy to match). Together they
+close both code-address subtleties: an op-dropped reached code slot
+(`[pop]` vs `[iszero,pop]` diverge on `.code L`), and a candidate reaching
+strictly deeper than the original (underflow on a shallow stack). Compiled runs
+do put return addresses in window reach (`compileArgs` dup past `pushLabel Lret`;
+the epilogue `retRot` window), so both were real.
+
+**Executor + gate soundness is complete and sorry-free** in
+`AsmScheduleSound.lean`, over WORD *and* `AVal` stacks:
+`symExec_sound`/`symExec_sound_pad`; `schedule_equiv`,
+`symStateEquiv_transform_eq`, `optimizeWindow_spec`, `optimizeWindow_equiv`
+(re-proved against the finalized gate); `realizeA`/`symStep_sound_AVal`/
+`symExec_run_AVal` (soundness over code-address stacks under the
+`opExposed`-are-words hypothesis that a source run supplies); and
+`wfProg_scheduleAsm` + `labelDefs`/`labelRefs`/`codeSize` preservation.
+
+**The single remaining obligation** is the whole-program forward simulation
+`scheduleAsm_asteps`/`_ahalt`, in the exact shape of
+`Peephole.optimizeAsm_asteps`/`optimizeAsm_ahalt`:
 
 ```
 scheduleAsm_asteps :
   [model : ExternalModel] → (labelDefs asm).Nodup →
   ASteps asm ⟨asm, [], y⟩ ⟨[], σf, yf⟩ →
   ASteps (scheduleAsm asm) ⟨scheduleAsm asm, [], y⟩ ⟨[], σf, yf⟩
-
 scheduleAsm_ahalt :  -- the halting-run counterpart
-  ...
 ```
 
-Ingredients already in `AsmScheduleSound.lean`: `optimizeWindow_equiv`
-(each window is step-equivalent over word stacks), `symExec_sound_pad` (the
-net-transform characterization the `symStateEquiv` gate needs),
-`labelDefs_optimizeWindow` / `labelRefs_optimizeWindow` (windows and their
-rewrites are label/jump-free, so `findLabel` is preserved — a `codeRel_findLabel`
-analogue over a `SchedRel` relation on suffixes).
-
-**Critical finding (resolved via Route 2).** `symExec`-equality does *not* imply
-operational equality over stacks holding **code addresses**: `[pop]` and
-`[iszero, pop]` have equal `symExec` but diverge on `.code L :: σ` (the op gets
-stuck — `AStep.op` needs `words args`). Compiled runs *do* put return addresses
-in window reach (`compileArgs`' `dup` reaches past `pushLabel Lret`; the epilogue
-`retRot` window). So the acceptance gate needs to be strengthened.
-
-**Resolved design — Route 2 (`opExposed`):** `SymState` gains
-`opExposed : List Nat` (input indices ever passed *directly* to an op), and the
-gate additionally requires `opExposed(candidate) ⊆ opExposed(original)`. Then:
-a successful **source** run proves every `opExposed(original)` slot is a word
-(the word-typing hypothesis, recovered from the run, not a backend invariant);
-the candidate ops only on that subset, all words; `push`/`dup`/`swap`/`pop` are
-`AVal`-untyped so code-address shuffling/dropping is safe. This is an **interface
-change** bundled with `symStateEquiv` by the scheduler agent — the exact Lean
-shape is agreed in the proof agent's report (SymState field, `symStep.op`
-recording `bareInps (take k)`, gate subset check; `symStateEquiv`/`symStateBeq`
-ignore `opExposed`).
-
-Remaining proof work once that interface lands: (1) generalize
-`realize`/`symExec_sound` to `AVal` under the `opExposed`-are-words hypothesis;
-(2) re-prove `optimizeWindow_equiv` against `symStateEquiv ∧ opExposed⊆`;
-(3) source-stuttering `scheduleAsm_asteps`/`_ahalt` (fire `optimizeWindow w`
-atomically at the window boundary via pure-`AStep` determinism).
-
-Until this lands, the merge cannot proceed at full rigor — **do not** merge on
-the strength of the executor lemmas alone.
-
----
+This is a standard `steps_sim` over a `CodeRel`-style `SchedRel` on suffixes
+(`window` pairs `w` with `optimizeWindow w`; `keep` for non-window instructions),
+with a `Match` whose mid-window constructor carries the symbolic state `s_pre` of
+the consumed prefix, the reached `AVal` valuation `ξ`, the invariant that the
+source stack is `realizeListA yst ξ s_pre.stack ++ ξ.drop s_pre.inputs ++ REST`,
+and that `opExposed s_pre` slots are words (accumulated as source op steps reveal
+words). Control flow is clean (windows label/jump-free → `findLabel` preserved,
+`StkRefs` carries over). At the window boundary the optimized side fires
+`optimizeWindow w` atomically via `symExec_run_AVal` + `optimizeWindow_spec` + an
+`AVal` mirror of `symStateEquiv_transform_eq`. All per-window mathematical
+content is proved; what remains is the (substantial but standard) forward-
+simulation assembly mirroring `AsmPeepholeSound`. Until it lands, do **not** merge
+on the executor lemmas alone.
 
 ## 1. Definition changes
 
