@@ -1464,6 +1464,113 @@ theorem symExec_run_AVal [model : ExternalModel] {prog : List Asm}
     exact hstep.trans hrec
 
 
+
+/-! ### Pure single-step determinism (for the mid-window simulation) -/
+
+theorem astep_push_inv [model : ExternalModel] {prog : List Asm} {v : U256} {c : List Asm}
+    {σ : List AVal} {y : EvmState} {b : AConf}
+    (h : AStep (model := model) prog ⟨.push v :: c, σ, y⟩ b) :
+    b = ⟨c, .word v :: σ, y⟩ := by cases h; rfl
+
+theorem astep_pop_inv [model : ExternalModel] {prog : List Asm} {c : List Asm}
+    {σ : List AVal} {y : EvmState} {b : AConf}
+    (h : AStep (model := model) prog ⟨.pop :: c, σ, y⟩ b) :
+    ∃ v σ', σ = v :: σ' ∧ b = ⟨c, σ', y⟩ := by
+  cases h with | pop => exact ⟨_, _, rfl, rfl⟩
+
+theorem astep_dup_inv [model : ExternalModel] {prog : List Asm} {m : Fin 16} {c : List Asm}
+    {σ : List AVal} {y : EvmState} {b : AConf}
+    (h : AStep (model := model) prog ⟨.dup m :: c, σ, y⟩ b) :
+    ∃ v τ ρ, σ = τ ++ v :: ρ ∧ τ.length = m.val ∧ b = ⟨c, v :: (τ ++ v :: ρ), y⟩ := by
+  cases h with | dup hτ => exact ⟨_, _, _, rfl, hτ, rfl⟩
+
+theorem astep_swap_inv [model : ExternalModel] {prog : List Asm} {m : Fin 16} {c : List Asm}
+    {σ : List AVal} {y : EvmState} {b : AConf}
+    (h : AStep (model := model) prog ⟨.swap m :: c, σ, y⟩ b) :
+    ∃ a bb τ ρ, σ = a :: (τ ++ bb :: ρ) ∧ τ.length = m.val
+      ∧ b = ⟨c, bb :: (τ ++ a :: ρ), y⟩ := by
+  cases h with | swap hτ => exact ⟨_, _, _, _, rfl, hτ, rfl⟩
+
+/-- Op-arity from a successful pure `stepOp`. -/
+theorem stepOp_pure_len {op : Op} {k : Nat} {args : List U256}
+    {st : EvmState} {r : YulSemantics.BuiltinResult U256 EvmState}
+    (hp : pureArity op = some k) (hs : stepOp op args st = some r) : args.length = k := by
+  have hun : ∀ (f : U256 → U256), un f args st = some r → args.length = 1 := by
+    intro f h; match args with
+    | [_] => rfl
+    | [] => simp [un] at h
+    | _ :: _ :: _ => simp [un] at h
+  have hbin : ∀ (f : U256 → U256 → U256), bin f args st = some r → args.length = 2 := by
+    intro f h; match args with
+    | [_, _] => rfl
+    | [] => simp [bin] at h
+    | [_] => simp [bin] at h
+    | _ :: _ :: _ :: _ => simp [bin] at h
+  have hter : ∀ (f : U256 → U256 → U256 → U256), ter f args st = some r → args.length = 3 := by
+    intro f h; match args with
+    | [_, _, _] => rfl
+    | [] => simp [ter] at h
+    | [_] => simp [ter] at h
+    | [_, _] => simp [ter] at h
+    | _ :: _ :: _ :: _ :: _ => simp [ter] at h
+  cases op <;> simp only [pureArity, Option.some.injEq, reduceCtorEq] at hp <;> subst hp <;>
+    simp only [stepOp] at hs <;>
+    first | exact hun _ hs | exact hbin _ hs | exact hter _ hs
+
+/-- For a pure op, the open-world relation is the deterministic `stepOp`. -/
+theorem builtin_pure_inv {calls creates} {op : Op} {k : Nat} {args : List U256}
+    {st : EvmState} {r : YulSemantics.BuiltinResult U256 EvmState}
+    (hp : pureArity op = some k)
+    (hb : builtinWithExternal calls creates op args st r) : stepOp op args st = some r := by
+  cases op <;> simp_all [builtinWithExternal, pureArity]
+
+/-- `AStep` on a window-admissible instruction is deterministic. -/
+theorem astep_pure_det [model : ExternalModel] {prog : List Asm} {i : Asm} {c : List Asm}
+    {σ : List AVal} {y : EvmState} {a b : AConf}
+    (hi : schedulable i = true)
+    (h1 : AStep (model := model) prog ⟨i :: c, σ, y⟩ a)
+    (h2 : AStep (model := model) prog ⟨i :: c, σ, y⟩ b) : a = b := by
+  cases i with
+  | push v => rw [astep_push_inv h1, astep_push_inv h2]
+  | pop =>
+      obtain ⟨v1, σ1, hσ1, rfl⟩ := astep_pop_inv h1
+      obtain ⟨v2, σ2, hσ2, rfl⟩ := astep_pop_inv h2
+      rw [hσ1] at hσ2; obtain ⟨rfl, rfl⟩ := List.cons.inj hσ2; rfl
+  | dup m =>
+      obtain ⟨v1, τ1, ρ1, hσ1, hl1, rfl⟩ := astep_dup_inv h1
+      obtain ⟨v2, τ2, ρ2, hσ2, hl2, rfl⟩ := astep_dup_inv h2
+      rw [hσ1] at hσ2
+      obtain ⟨rfl, hvρ⟩ := List.append_inj hσ2 (hl1.trans hl2.symm)
+      obtain ⟨rfl, rfl⟩ := List.cons.inj hvρ; rfl
+  | swap m =>
+      obtain ⟨a1, b1, τ1, ρ1, hσ1, hl1, rfl⟩ := astep_swap_inv h1
+      obtain ⟨a2, b2, τ2, ρ2, hσ2, hl2, rfl⟩ := astep_swap_inv h2
+      rw [hσ1] at hσ2
+      obtain ⟨rfl, hτρ⟩ := List.cons.inj hσ2
+      obtain ⟨rfl, hbρ⟩ := List.append_inj hτρ (hl1.trans hl2.symm)
+      obtain ⟨rfl, rfl⟩ := List.cons.inj hbρ; rfl
+  | op yop =>
+      obtain ⟨k, hp⟩ := Option.isSome_iff_exists.mp (by simpa [schedulable_op_eq] using hi)
+      obtain ⟨args1, rets1, σ1, yst1, hσ1, hb1, rfl⟩ := Peephole.astep_op_inv h1
+      obtain ⟨args2, rets2, σ2, yst2, hσ2, hb2, rfl⟩ := Peephole.astep_op_inv h2
+      have hs1 := builtin_pure_inv hp hb1
+      have hs2 := builtin_pure_inv hp hb2
+      have hlen : (words args1).length = (words args2).length := by
+        rw [words_length, words_length, stepOp_pure_len hp hs1, stepOp_pure_len hp hs2]
+      rw [hσ1] at hσ2
+      obtain ⟨hwa, rfl⟩ := List.append_inj hσ2 hlen
+      simp only [words] at hwa
+      obtain rfl : args1 = args2 :=
+        List.map_injective_iff.mpr (fun a b h => AVal.word.inj h) hwa
+      rw [hs1] at hs2
+      obtain ⟨rfl, rfl⟩ := by simpa using hs2
+      rfl
+  | label l => rw [schedulable_label_eq] at hi; exact absurd hi (by simp)
+  | jump l => rw [schedulable_jump_eq] at hi; exact absurd hi (by simp)
+  | jumpi l => rw [schedulable_jumpi_eq] at hi; exact absurd hi (by simp)
+  | pushLabel l => rw [schedulable_pushLabel_eq] at hi; exact absurd hi (by simp)
+  | dynJump => rw [schedulable_dynJump_eq] at hi; exact absurd hi (by simp)
+
 /-! ### Whole-program bridge: the suffix relation `SchedRel`
 
 `SchedRel P Q` relates a source suffix to a scheduled suffix: keep a
