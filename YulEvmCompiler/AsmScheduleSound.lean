@@ -1,5 +1,6 @@
 import YulEvmCompiler.AsmSchedule
 import YulEvmCompiler.AsmSem
+import YulEvmCompiler.AsmPeepholeSound
 set_option warningAsError true
 set_option maxRecDepth 4000
 /-!
@@ -1461,6 +1462,116 @@ theorem symExec_run_AVal [model : ExternalModel] {prog : List Asm}
     have hrec := ih s1 s c h2 hle hop
     rw [List.cons_append]
     exact hstep.trans hrec
+
+
+/-! ### Whole-program bridge: the suffix relation `SchedRel`
+
+`SchedRel P Q` relates a source suffix to a scheduled suffix: keep a
+non-window instruction verbatim, or replace a *nonempty* all-admissible window
+`w` by `optimizeWindow w`. `scheduleAsm p` is `SchedRel`-related to `p`. -/
+
+inductive SchedRel : List Asm → List Asm → Prop
+  | nil : SchedRel [] []
+  | keep (i : Asm) {c c' : List Asm} : SchedRel c c' → SchedRel (i :: c) (i :: c')
+  | window {w c c' : List Asm} (hne : w ≠ []) (hw : ∀ i ∈ w, schedulable i = true) :
+      SchedRel c c' → SchedRel (w ++ c) (optimizeWindow w ++ c')
+
+theorem SchedRel.refl : ∀ (p : List Asm), SchedRel p p
+  | [] => .nil
+  | i :: p => .keep i (SchedRel.refl p)
+
+/-- `cutLen` is always positive. -/
+theorem cutLen_pos (run : List Asm) : 1 ≤ cutLen run := by
+  unfold cutLen; dsimp only; split
+  · rename_i j hj
+    obtain ⟨k, hk, rfl⟩ := List.mem_map.mp (List.mem_filter.mp (List.mem_of_getLast? hj)).1
+    omega
+  · exact Nat.le_max_left 1 _
+
+/-- The cut window is nonempty (its head `i` is admissible so the run is
+nonempty, and `cutLen ≥ 1`). -/
+theorem window_ne_nil (i : Asm) (rest : List Asm) (hi : schedulable i = true) :
+    ((i :: rest).takeWhile schedulable).take (cutLen ((i :: rest).takeWhile schedulable)) ≠ [] := by
+  have hrun : 0 < ((i :: rest).takeWhile schedulable).length := by
+    rw [List.takeWhile_cons_of_pos hi]; simp
+  have hc := cutLen_pos ((i :: rest).takeWhile schedulable)
+  rw [← List.length_pos_iff, List.length_take]
+  omega
+
+/-- `findLabel` skips over an admissible (label-free) window. -/
+theorem findLabel_of_labelDefs_nil {w : List Asm} (hw : labelDefs w = []) (l : Label)
+    (c : List Asm) : findLabel l (w ++ c) = findLabel l c := by
+  induction w with
+  | nil => rfl
+  | cons i w ih =>
+    rw [labelDefs_cons] at hw
+    have hi : i.defines = none := by
+      cases hd : i.defines with
+      | none => rfl
+      | some d => rw [hd] at hw; simp at hw
+    have hne : i ≠ .label l := by
+      intro he; rw [he] at hi; simp [Asm.defines] at hi
+    rw [List.cons_append, findLabel, if_neg hne, ih (by rw [hi] at hw; simpa using hw)]
+
+/-- `scheduleAsm` is `SchedRel`-related to its input. -/
+theorem codeRel_scheduleAsmFuel : ∀ (fuel : Nat) (p : List Asm),
+    SchedRel p (scheduleAsmFuel fuel p) := by
+  intro fuel
+  induction fuel with
+  | zero => intro p; exact SchedRel.refl p
+  | succ fuel ih =>
+    intro p
+    cases p with
+    | nil => exact .nil
+    | cons i rest =>
+      rw [scheduleAsmFuel]
+      split
+      · rename_i hi
+        dsimp only
+        have hsp := window_split i rest hi
+        have hne := window_ne_nil i rest hi
+        have hwsch := window_all_sched i rest
+        set run := (i :: rest).takeWhile schedulable with hrun
+        set win := run.take (cutLen run) with hwin
+        set tail := (i :: rest).drop (cutLen run) with htail
+        rw [← hsp]
+        exact SchedRel.window hne hwsch (ih tail)
+      · exact SchedRel.keep i (ih rest)
+
+theorem codeRel_scheduleAsm (p : List Asm) : SchedRel p (scheduleAsm p) :=
+  codeRel_scheduleAsmFuel _ p
+
+/-- `SchedRel` preserves `findLabel` on every label, and relates the targets. -/
+theorem schedRel_findLabel {P Q : List Asm} (h : SchedRel P Q) (l : Label) :
+    ∀ {tgt : List Asm}, findLabel l P = some tgt →
+      ∃ otgt, findLabel l Q = some otgt ∧ SchedRel tgt otgt := by
+  induction h with
+  | nil => intro tgt hf; simp [findLabel] at hf
+  | keep i hc ih =>
+      intro tgt hf
+      rw [findLabel] at hf
+      by_cases hi : i = .label l
+      · subst hi; rw [if_pos rfl] at hf
+        obtain rfl := Option.some.inj hf
+        exact ⟨_, by rw [findLabel, if_pos rfl], hc⟩
+      · rw [if_neg hi] at hf
+        obtain ⟨otgt, ho, hr⟩ := ih hf
+        exact ⟨otgt, by rw [findLabel, if_neg hi]; exact ho, hr⟩
+  | @window w c c' hne hw hc ih =>
+      intro tgt hf
+      rw [findLabel_of_labelDefs_nil (labelDefs_eq_nil_of_schedulable hw)] at hf
+      obtain ⟨otgt, ho, hr⟩ := ih hf
+      exact ⟨otgt, by rw [findLabel_of_labelDefs_nil (labelDefs_optimizeWindow hw)]; exact ho, hr⟩
+
+/-- `SchedRel` with empty source forces empty scheduled. -/
+theorem schedRel_nil_left {Q : List Asm} (h : SchedRel [] Q) : Q = [] := by
+  generalize he : ([] : List Asm) = P at h
+  cases h with
+  | nil => rfl
+  | keep i hc => exact absurd he (by simp)
+  | window hne hw hc =>
+      rename_i w c c'
+      exact absurd (List.append_eq_nil_iff.mp he.symm).1 hne
 
 /-! ## Status and the remaining whole-program bridge
 
