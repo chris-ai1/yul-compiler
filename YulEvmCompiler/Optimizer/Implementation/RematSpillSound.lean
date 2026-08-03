@@ -5,6 +5,18 @@ set_option warningAsError true
 /-!
 # Soundness of substitute-only rematerialization
 
+**STATUS (2026-08): proof paused, green.** The reusable core is proven —
+expression-level substitution congruence (`subst_expr_fwd`/`_bwd`,
+`subst_args_fwd`/`_bwd`), `RematOk.frame` (invariant preserved under env
+framing), and `RematOk.cons_let` (fact creation). The remaining statement-level
+`Step` simulation + `EquivBlock`/object assembly are NOT done. Work was stood
+down per the prove-what-pays policy: origin/main's SSA-CFG backend now races the
+classic path per object and wins the hot uniswap objects (PoolSwap 51,030 via
+SSA vs 55,267 classic), collapsing remat's residual justification on this
+corpus. The `RematSpill` transform stays merged (it still wins the race on some
+spill-path objects corpus-wide) and is empirically validated; only the machine
+proof is deferred.
+
 `RematSpill.rematSubstBlock` replaces reads of a single-def, pure-total,
 stable-free-var producer variable `x` by its producer expression `e`, keeping
 every binding in place (`DeadPure`, composed afterwards, deletes the now-dead
