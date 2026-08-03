@@ -163,16 +163,31 @@ def finishProgOrdScheduled (ord : Bool) (P : Prog) : Option (List YulEvmCompiler
   let opt := YulEvmCompiler.Schedule.scheduleAsm (optimizeAsm asm)
   if stackOK2 opt then lowerProg opt else none
 
-/-- **PROTOTYPE, UNPROVEN.** `compileViaSsa` with the window scheduler applied to
-each SSA candidate's Asm. Kept separate so the verified `compileViaSsa` and its
-proofs are untouched. -/
+/-- **PROTOTYPE, UNPROVEN.** `compileViaSsa` with the window scheduler applied.
+Crucially, it picks the SAME candidate `compileViaSsa` would (by plain
+`instrCost`) and only THEN schedules that candidate's Asm — the scheduler is
+per-window strictly-cheaper, so the result is ≤ the plain SSA winner and the
+selection never flips. (Scheduling all four and re-picking by the static proxy
+flipped the winner and regressed one fixture; this ordering can't.) -/
 def compileViaSsaScheduled (prog : YulSemantics.Block Op) :
     Option (List YulEvmCompiler.Instr) := do
   let P ← ofBlock prog
   if !(ToAsm.Prog.domCheck P) then none else
   let Popt := optimizeProg P
-  let cands := [finishProgOrdScheduled true Popt, finishProgOrdScheduled false Popt,
-                finishProgOrdScheduled true P, finishProgOrdScheduled false P]
-  cands.foldl (pickMin instrCost) none
+  -- score each (ord, prog) candidate by its PLAIN lowered cost, keeping its Asm
+  let cand := fun (ord : Bool) (Q : Prog) =>
+    (ToAsm.emitProgOrd ord Q).bind (fun a =>
+      if wfCheck a then
+        let opt := optimizeAsm a
+        if stackOK2 opt then (lowerProg opt).map (fun is => (a, instrCost is)) else none
+      else none)
+  let scored := [cand true Popt, cand false Popt, cand true P, cand false P].filterMap id
+  match scored.foldl (fun best c => match best with
+      | none => some c
+      | some b => if c.2 < b.2 then some c else some b) none with
+  | none => none
+  | some (a, _) =>
+      let opt := YulEvmCompiler.Schedule.scheduleAsm (optimizeAsm a)
+      if stackOK2 opt then lowerProg opt else none
 
 end YulEvmCompiler.SsaCfg
