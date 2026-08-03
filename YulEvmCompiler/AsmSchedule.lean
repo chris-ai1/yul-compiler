@@ -484,12 +484,16 @@ def arrange1 : Nat → EvSt → Nat → Option EvSt
       match findIdx a ev.es.model.stack with
       | none => recompute fuel ev a
       | some depth =>
+          -- input leaves are NEVER consumed (always DUP): the k inputs stay pinned
+          -- at their canonical positions so the store-in-place writeback can find
+          -- and overwrite them. Only intermediates are moved/consumed at last use.
+          let isInp := match ev.es.dag.node a with | .inp _ => true | _ => false
           if h : depth < 16 then
-            if ev.rem[a]! ≤ 1 then
+            if ev.rem[a]! ≤ 1 && !isInp then
               if depth == 0 then some (ev.dec a)
               else (emitEv ev (.swap ⟨depth - 1, by omega⟩)).map (fun ev => ev.dec a)
             else (emitEv ev (.dup ⟨depth, h⟩)).map (fun ev => ev.dec a)
-          else recompute fuel ev a
+          else if isInp then none else recompute fuel ev a
 def recompute : Nat → EvSt → Nat → Option EvSt
   | 0, _, _ => none
   | fuel + 1, ev, a =>
@@ -545,6 +549,57 @@ def scheduleTopo (d : Dag) (target : SymState) (fuel : Nat) : Option (List Asm) 
       | none => none
       | some ev2 => (emitCleanup m ev2.es b).map ES.code
 
+/-- Stack index of the input leaf `inp j`. -/
+def findInpSlot (d : Dag) (j : Nat) (stack : List Nat) : Option Nat :=
+  stack.findIdx? (fun x => match d.node x with | .inp i => i == j | _ => false)
+
+/-- Write the (already-computed) value `id` into canonical slot `j`: bring `id`
+to the top (consuming it — last use), then `swap; pop` it into `inp j`'s
+position, overwriting the dead input there. -/
+def storeChanged (fuel : Nat) (ev : EvSt) (jid : Nat × Nat) : Option EvSt :=
+  match arrange1 fuel ev jid.2 with
+  | none => none
+  | some ev =>
+      match findInpSlot ev.es.dag jid.1 ev.es.model.stack with
+      | none => none
+      | some depth =>
+          if h : 0 < depth ∧ depth - 1 < 16 then
+            (emitEv ev (.swap ⟨depth - 1, h.2⟩)).bind (fun ev => emitEv ev .pop)
+          else none
+
+/-- **Topo phase-1 + store-into-canonical-slots phase-2** (the decisive combine).
+Canonical windows only (`m = k`, non-changed slots identity). Phase-1 computes
+every reachable node once in id order (interleaved → small live set; inputs kept
+intact by `arrange1`). Phase-2 `swap;pop`s each changed output into its slot,
+overwriting the dead input; identity slots are never touched — no relocate, no
+rotating cleanup, no separate output DUP. -/
+def scheduleTopoStore (d : Dag) (target : SymState) (fuel : Nat) : Option (List Asm) :=
+  let T := target.stack
+  let m := T.length
+  let k := target.inputs
+  if m != k then none else
+  let slots := T.zipIdx
+  let hasMove := slots.any (fun (id, j) => match d.node id with | .inp i => i != j | _ => false)
+  if hasMove then none else
+  let changed := slots.filterMap (fun (id, j) =>
+    match d.node id with | .inp _ => none | _ => some (j, id))
+  let rem := computeRem d T
+  let n := d.nodes.size
+  let ev0 : EvSt := ⟨initES d k, rem⟩
+  match (List.range n).foldlM (fun ev id =>
+      if rem[id]! > 0 then
+        match d.node id with
+        | .app op args =>
+            if (findIdx id ev.es.model.stack).isSome then some ev
+            else match arrangeArgs fuel ev args.reverse with
+                 | none => none
+                 | some ev' => emitEv ev' (.op op)
+        | _ => some ev
+      else some ev) ev0 with
+  | none => none
+  | some ev1 => (changed.foldlM (fun ev jid => storeChanged fuel ev jid) ev1).map
+      (fun ev => ev.es.code)
+
 /-- Eviction-aware scheduler: compute every output (consuming intermediates at
 last use), then DUP the outputs into pre-rotated place and remove the (now small)
 remainder with the rotating cleanup. -/
@@ -568,7 +623,8 @@ def scheduleEvict (d : Dag) (target : SymState) (fuel : Nat) : Option (List Asm)
 /-- Candidate schedules; the gate keeps the cheapest valid one. -/
 def scheduleCandidates (d : Dag) (target : SymState) : List (List Asm) :=
   let fuel := 16 * (reachCount d target.stack) + 200
-  (scheduleTopo d target fuel).toList
+  (scheduleTopoStore d target fuel).toList
+    ++ (scheduleTopo d target fuel).toList
     ++ (scheduleEvict d target fuel).toList
     ++ (scheduleLinear d target fuel).toList
     ++ (scheduleStoreInPlace d target fuel).toList
