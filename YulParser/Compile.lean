@@ -441,7 +441,10 @@ def compileSource (source : String) (libraries : LinkEnv := []) :
       -- SSA-CFG backend on the object path too (same layout fixpoint, SSA
       -- per code block); both artifacts are kept and the cheaper bytecode
       -- (static stack-traffic cost) wins.
-      let ssaLayout := YulEvmCompiler.SsaCfg.compileObjectViaSsa optimized
+      -- PROTOTYPE: window-schedule the SSA output first (its layout is SWAP-heavy);
+      -- fall back to the plain SSA lowering if scheduling trips the stackOK2 gate.
+      let ssaLayout := YulEvmCompiler.SsaCfg.compileObjectViaSsaScheduled optimized
+        <|> YulEvmCompiler.SsaCfg.compileObjectViaSsa optimized
       let classicLayout := tryLayouts optimized
         <|> tryLayouts (YulEvmCompiler.Optimizer.optimizerPipelineObjectNoRejoin
           (calls := YulSemantics.EVM.ExternalCalls.none)

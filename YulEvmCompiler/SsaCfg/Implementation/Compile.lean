@@ -151,4 +151,28 @@ def compileViaSsa (prog : YulSemantics.Block Op) :
                 finishProgOrd true P, finishProgOrd false P]
   cands.foldl (pickMin instrCost) none
 
+/-- **PROTOTYPE, UNPROVEN.** `finishProgOrd` with the Asm-level window scheduler
+(`Schedule.scheduleAsm`) inserted after the verified peephole and before the
+overflow gate — exactly the classic chain's hook. The SSA layout algorithm is
+SWAP-heavy; the gate-validated window scheduler rewrites those windows. Labels
+are untouched (windows are label-free) and `codeSize` never grows, so `stackOK2`
+and `lowerProg` are taken on well-formed code. -/
+def finishProgOrdScheduled (ord : Bool) (P : Prog) : Option (List YulEvmCompiler.Instr) := do
+  let asm ← ToAsm.emitProgOrd ord P
+  if !wfCheck asm then none else
+  let opt := YulEvmCompiler.Schedule.scheduleAsm (optimizeAsm asm)
+  if stackOK2 opt then lowerProg opt else none
+
+/-- **PROTOTYPE, UNPROVEN.** `compileViaSsa` with the window scheduler applied to
+each SSA candidate's Asm. Kept separate so the verified `compileViaSsa` and its
+proofs are untouched. -/
+def compileViaSsaScheduled (prog : YulSemantics.Block Op) :
+    Option (List YulEvmCompiler.Instr) := do
+  let P ← ofBlock prog
+  if !(ToAsm.Prog.domCheck P) then none else
+  let Popt := optimizeProg P
+  let cands := [finishProgOrdScheduled true Popt, finishProgOrdScheduled false Popt,
+                finishProgOrdScheduled true P, finishProgOrdScheduled false P]
+  cands.foldl (pickMin instrCost) none
+
 end YulEvmCompiler.SsaCfg

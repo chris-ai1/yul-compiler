@@ -21,4 +21,9 @@ open YulSemantics.EVM (Op)
 def compileObjectViaSsa (o : Object Op) : Option YulSemantics.EVM.Layout :=
   compileResolvedObjectWith compileViaSsa o
 
+/-- **PROTOTYPE, UNPROVEN.** SSA object compiler with the Asm window scheduler
+applied to every code block. -/
+def compileObjectViaSsaScheduled (o : Object Op) : Option YulSemantics.EVM.Layout :=
+  compileResolvedObjectWith compileViaSsaScheduled o
+
 end YulEvmCompiler.SsaCfg
