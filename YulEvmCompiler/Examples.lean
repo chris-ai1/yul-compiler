@@ -511,10 +511,11 @@ def selfdestructOps : Block Op := yul% {
 -- is 12 bytes.
 #guard ((compileProgram breakContinue).map fun asm =>
     codeSize (optimizeAsm asm) + 12 == codeSize asm) = some true
--- Where no window, inverted branch, or dead label occurs, the peephole is
--- the identity.
+-- A switch dispatch tests each case with `eq`, inverted into the
+-- fall-through `jumpi` — exactly the eq-sub window: each of the three case
+-- guards drops its `iszero` for a `sub` (one byte and three gas apiece).
 #guard ((compileProgram switchMatch).map fun asm =>
-    optimizeAsm asm == asm) = some true
+    codeSize (optimizeAsm asm) + 3 == codeSize asm) = some true
 #guard (compile byteAndOverlapCopy).isSome
 #guard (compileProgram signExtendCases).isSome
 #guard (compile signExtendCases).isSome
