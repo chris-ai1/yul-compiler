@@ -40,7 +40,7 @@ conditionalUnsimplifier/clear_before_for_condition.yul	498	432
 conditionalUnsimplifier/clear_before_for_post.yul	27368	27344
 conditionalUnsimplifier/no_opt_inside_if.yul	16228	16180
 conditionalUnsimplifier/opt_after_terminating_if.yul	16228	16174
-conditionalUnsimplifier/opt_switch.yul	544	381
+conditionalUnsimplifier/opt_switch.yul	529	381
 conditionalUnsimplifier/smoke.yul	0	0
 constantOptimiser/difficult.yul	0	0
 constantOptimiser/gaps.yul	192	156
@@ -150,7 +150,7 @@ expressionSimplifier/identity_rules_simple.yul	27296	27296
 expressionSimplifier/including_function_calls.yul	27296	27458
 expressionSimplifier/invalid_match.yul	180	666
 expressionSimplifier/invariant.yul	27260	27332
-expressionSimplifier/iszero_sub_to_eq.yul	22291	22321
+expressionSimplifier/iszero_sub_to_eq.yul	22273	22321
 expressionSimplifier/large_byte_access.yul	424290	424260
 expressionSimplifier/mcopy_non_zero_size.yul	288	294
 expressionSimplifier/mcopy_zero_size.yul	264	270
