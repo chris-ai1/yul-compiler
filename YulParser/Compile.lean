@@ -490,7 +490,17 @@ def compileSource (source : String) (libraries : LinkEnv := []) :
       let asm :=
         match ssa, classic with
         | some a, some b =>
-            if YulEvmCompiler.SsaCfg.instrCost a ≤ YulEvmCompiler.SsaCfg.instrCost b
+            -- Prefer the statically cheaper candidate; break cost ties by
+            -- assembled size and, on full ties, keep the classic artifact. A
+            -- cost tie carries no information, and handing it to the other
+            -- backend can flip loop-heavy fixtures onto a runtime-costlier
+            -- lowering (measured: +79k gas on a corpus loop when an Asm
+            -- peephole improvement tied the two candidates' costs).
+            let ca := YulEvmCompiler.SsaCfg.instrCost a
+            let cb := YulEvmCompiler.SsaCfg.instrCost b
+            if ca < cb ∨ (ca = cb ∧
+                (YulEvmCompiler.assembleBytes a).length
+                  < (YulEvmCompiler.assembleBytes b).length)
             then some a else some b
         | some a, none => some a
         | none, cb => cb
@@ -584,8 +594,11 @@ def compileSource (source : String) (libraries : LinkEnv := []) :
       let layout ←
         match ssaLayout, classicLayout with
         | some a, some b =>
-            if YulEvmCompiler.SsaCfg.byteCodeCost a.code
-                ≤ YulEvmCompiler.SsaCfg.byteCodeCost b.code
+            -- Same tie-break discipline as the block path: cost, then bytes,
+            -- then the classic artifact.
+            let ca := YulEvmCompiler.SsaCfg.byteCodeCost a.code
+            let cb := YulEvmCompiler.SsaCfg.byteCodeCost b.code
+            if ca < cb ∨ (ca = cb ∧ a.code.length < b.code.length)
             then some a else some b
         | some a, none => some a
         | none, cb => cb
