@@ -194,6 +194,13 @@ def peepRun (R : List Label) : List Asm → List Asm
       else .op .sub :: .jumpi l :: peepRun R (.jump m :: .label l' :: rest)
   | .op .eq :: .op .iszero :: .jumpi l :: rest =>
       .op .sub :: .jumpi l :: peepRun R rest
+  | .op .sub :: .op .iszero :: rest =>
+      -- iszero(a - b) IS eq(a, b), one instruction and three gas cheaper.
+      -- Recovers the optimal eq;jumpi when multi-round interplay (a dead
+      -- label dropping between a rewritten jumpi and a jump makes a
+      -- branch-inversion window appear only in a later round) lands on the
+      -- pessimal sub;iszero;jumpi form the eq-sub guard cannot foresee.
+      .op .eq :: peepRun R rest
   | .op .gas :: .op yop :: rest =>
       match gasCallKind? yop with
       | some k => .gasCall k :: peepRun R rest
@@ -254,6 +261,13 @@ def peepRunP (mem : Label → Bool) : List Asm → List Asm
       else .op .sub :: .jumpi l :: peepRunP mem (.jump m :: .label l' :: rest)
   | .op .eq :: .op .iszero :: .jumpi l :: rest =>
       .op .sub :: .jumpi l :: peepRunP mem rest
+  | .op .sub :: .op .iszero :: rest =>
+      -- iszero(a - b) IS eq(a, b), one instruction and three gas cheaper.
+      -- Recovers the optimal eq;jumpi when multi-round interplay (a dead
+      -- label dropping between a rewritten jumpi and a jump makes a
+      -- branch-inversion window appear only in a later round) lands on the
+      -- pessimal sub;iszero;jumpi form the eq-sub guard cannot foresee.
+      .op .eq :: peepRunP mem rest
   | .op .gas :: .op yop :: rest =>
       match gasCallKind? yop with
       | some k => .gasCall k :: peepRunP mem rest
@@ -378,6 +392,12 @@ inductive CodeRel (R : List Label) : List Asm → List Asm → Prop
   | pushDup {v : U256} {c c' : List Asm} :
       CodeRel R c c' →
       CodeRel R (.push v :: .push v :: c) (.push v :: .dup 0 :: c')
+  /-- Collapse a subtraction whose only observation is a zero test:
+  `iszero(a - b)` is exactly `eq(a, b)` (words subtract to zero exactly when
+  equal), one instruction cheaper in every context. -/
+  | subIszeroEq {c c' : List Asm} :
+      CodeRel R c c' →
+      CodeRel R (.op .sub :: .op .iszero :: c) (.op .eq :: c')
   /-- Decide a constant nonzero branch condition: the jump is always taken. -/
   | pushJumpiTaken {v : U256} (hv : v ≠ 0) {l : Label} {c c' : List Asm} :
       CodeRel R c c' →
@@ -431,20 +451,21 @@ theorem codeRel_peepRun (R : List Label) (p : List Asm) : CodeRel R p (peepRun R
   | case11 m l' rest ih => exact CodeRel.keep _ ih
   | case12 l m l' rest hne ih => exact CodeRel.eqSubJumpi ih
   | case13 l rest hexcl ih => exact CodeRel.eqSubJumpi ih
-  | case14 yop rest k heq ih =>
+  | case14 rest ih => exact CodeRel.subIszeroEq ih
+  | case15 yop rest k heq ih =>
       obtain rfl := eq_op_of_gasCallKind? heq
       exact CodeRel.gasFuse ih
-  | case15 yop rest heq ih => exact CodeRel.keep _ ih
-  | case16 m l' rest ih => exact CodeRel.brInv ih
-  | case17 l m l' rest hne ih => exact CodeRel.keep _ ih
-  | case18 l' rest ih => exact CodeRel.jumpiNext ih
-  | case19 l l' rest hne ih => exact CodeRel.keep _ ih
-  | case20 l' rest ih => exact CodeRel.jumpNext ih
-  | case21 l l' rest hne ih => exact CodeRel.keep _ ih
-  | case22 l rest hmem ih => exact CodeRel.keep _ ih
-  | case23 l rest hmem ih => exact CodeRel.dropLabel hmem ih
-  | case24 i rest _ _ _ _ _ _ _ _ _ _ _ _ _ ih => exact CodeRel.keep i ih
-  | case25 => exact CodeRel.nil
+  | case16 yop rest heq ih => exact CodeRel.keep _ ih
+  | case17 m l' rest ih => exact CodeRel.brInv ih
+  | case18 l m l' rest hne ih => exact CodeRel.keep _ ih
+  | case19 l' rest ih => exact CodeRel.jumpiNext ih
+  | case20 l l' rest hne ih => exact CodeRel.keep _ ih
+  | case21 l' rest ih => exact CodeRel.jumpNext ih
+  | case22 l l' rest hne ih => exact CodeRel.keep _ ih
+  | case23 l rest hmem ih => exact CodeRel.keep _ ih
+  | case24 l rest hmem ih => exact CodeRel.dropLabel hmem ih
+  | case25 i rest _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih => exact CodeRel.keep i ih
+  | case26 => exact CodeRel.nil
 
 /-- One `optimizeAsmRound` is `CodeRel`-related to its input, relative to the
 program's own reference set. -/
@@ -480,6 +501,9 @@ theorem codeRel_labelDefs_sublist {R : List Label} {P Q : List Asm}
       simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
         List.nil_append] using ih
   | eqSubJumpi _ ih =>
+      simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
+        List.nil_append] using ih
+  | subIszeroEq _ ih =>
       simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
         List.nil_append] using ih
   | pushDup _ ih =>
@@ -574,6 +598,12 @@ theorem codeRel_labelDefs_mem {R : List Label} {P Q : List Asm}
           · exact absurd h3 (by simp)
           · exact mem_labelDefs_cons.mpr (Or.inr
               (mem_labelDefs_cons.mpr (Or.inr (ih h3))))
+  | subIszeroEq _ ih =>
+      rcases mem_labelDefs_cons.mp hl with h' | h'
+      · exact absurd h' (by simp)
+      · rcases mem_labelDefs_cons.mp h' with h'' | h''
+        · exact absurd h'' (by simp)
+        · exact mem_labelDefs_cons.mpr (Or.inr (ih h''))
   | pushDup _ ih =>
       rcases mem_labelDefs_cons.mp hl with h' | h'
       · exact absurd h' (by simp)
@@ -680,6 +710,12 @@ theorem codeRel_labelRefs_subset {R : List Label} {P Q : List Asm}
             (mem_labelRefs_cons.mpr (Or.inl h'')))))
         · exact mem_labelRefs_cons.mpr (Or.inr (mem_labelRefs_cons.mpr (Or.inr
             (mem_labelRefs_cons.mpr (Or.inr (ih l' h''))))))
+  | subIszeroEq _ ih =>
+      intro l' hl'
+      rcases mem_labelRefs_cons.mp hl' with h' | h'
+      · exact absurd h' (by simp [Asm.references])
+      · exact mem_labelRefs_cons.mpr (Or.inr (mem_labelRefs_cons.mpr (Or.inr
+          (ih l' h'))))
   | pushDup _ ih =>
       intro l' hl'
       rcases mem_labelRefs_cons.mp hl' with h' | h'
@@ -732,6 +768,7 @@ theorem codeRel_codeSize_le {R : List Label} {P Q : List Asm}
   | dblIszero _ ih => simp only [codeSize_cons, Asm.size]; omega
   | gasFuse _ ih => simp only [codeSize_cons, Asm.size]; omega
   | eqSubJumpi _ ih => simp only [codeSize_cons, Asm.size]; omega
+  | subIszeroEq _ ih => simp only [codeSize_cons, Asm.size]; omega
   | pushDup _ ih => simp only [codeSize_cons, Asm.size]; omega
   | pushJumpiTaken _ _ ih => simp only [codeSize_cons, Asm.size]; omega
   | pushJumpiFall _ ih => simp only [codeSize_cons, Asm.size]; omega
@@ -808,6 +845,11 @@ theorem codeRel_findLabel {R : List Label} {P Q : List Asm} (h : CodeRel R P Q)
       obtain ⟨otgt, ho, hr⟩ := ih hf
       exact ⟨otgt, by rw [findLabel, if_neg (by simp), findLabel,
         if_neg (by simp)]; exact ho, hr⟩
+  | subIszeroEq hc ih =>
+      intro tgt hf
+      rw [findLabel, if_neg (by simp), findLabel, if_neg (by simp)] at hf
+      obtain ⟨otgt, ho, hr⟩ := ih hf
+      exact ⟨otgt, by rw [findLabel, if_neg (by simp)]; exact ho, hr⟩
   | pushDup hc ih =>
       intro tgt hf
       rw [findLabel, if_neg (by simp), findLabel, if_neg (by simp)] at hf

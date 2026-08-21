@@ -170,6 +170,13 @@ inductive Match [model : ExternalModel] (R : List Label) : AConf → AConf → P
       CodeRel R sc oc →
       Match R ⟨.jumpi l :: sc, .word (b2w (b2w (a = b) = 0)) :: σ, y⟩
               ⟨.jumpi l :: oc, .word (a - b) :: σ, y⟩
+  /-- Sub-iszero window: the source has subtracted; the optimized side still
+  holds both operands for its `eq`, whose result equals the source's zero
+  test bit for bit. -/
+  | si1 {a b : U256} {σ : List AVal} {sc oc : List Asm} {y : EvmState} :
+      CodeRel R sc oc →
+      Match R ⟨.op .iszero :: sc, .word (a - b) :: σ, y⟩
+              ⟨.op .eq :: oc, .word a :: .word b :: σ, y⟩
   /-- Push-dup window: both sides have materialized the constant once; the
   source re-pushes it, the optimized side duplicates it. -/
   | pd1 {v : U256} {σ : List AVal} {sc oc : List Asm} {y : EvmState} :
@@ -249,6 +256,15 @@ theorem sub_step [model : ExternalModel] {prog' c : List Asm}
       ⟨c, .word (a - b) :: σ, y⟩ := by
   have h := AStep.op (model := model) (prog := prog') (yop := .sub)
     (args := [a, b]) (rets := [a - b]) (c := c) (σ := σ) (yst := y) (yst' := y) rfl
+  simpa [words] using h
+
+/-- The `eq` step the optimized side of a sub-iszero window executes. -/
+theorem eq_step [model : ExternalModel] {prog' c : List Asm}
+    {a b : U256} {σ : List AVal} {y : EvmState} :
+    AStep (model := model) prog' ⟨.op .eq :: c, .word a :: .word b :: σ, y⟩
+      ⟨c, .word (b2w (a = b)) :: σ, y⟩ := by
+  have h := AStep.op (model := model) (prog := prog') (yop := .eq)
+    (args := [a, b]) (rets := [b2w (a = b)]) (c := c) (σ := σ) (yst := y) (yst' := y) rfl
   simpa [words] using h
 
 /-- Invert a successful `iszero` built-in step: one argument, the `b2w`
@@ -331,6 +347,42 @@ theorem eq_no_halt [model : ExternalModel] {args : List U256}
   | _ :: _ :: _ :: _ => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
       YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
 
+/-- Invert a successful `sub` built-in step. -/
+theorem sub_inv [model : ExternalModel] {args rets : List U256}
+    {yst yst' : EvmState}
+    (hb : YulSemantics.EVM.builtinWithExternal model.calls model.creates model.gas
+      .sub args yst (.ok rets yst')) :
+    ∃ a b, args = [a, b] ∧ rets = [a - b] ∧ yst' = yst := by
+  match args with
+  | [a, b] =>
+      obtain ⟨rfl, rfl⟩ :
+          [a - b] = rets ∧ yst = yst' := by
+        have h := Option.some.inj hb
+        cases h
+        exact ⟨rfl, rfl⟩
+      exact ⟨a, b, rfl, rfl, rfl⟩
+  | [] => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
+      YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
+  | [_] => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
+      YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
+  | _ :: _ :: _ :: _ => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
+      YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
+
+/-- `sub` never halts. -/
+theorem sub_no_halt [model : ExternalModel] {args : List U256}
+    {yst yf : EvmState}
+    (hb : YulSemantics.EVM.builtinWithExternal model.calls model.creates model.gas
+      .sub args yst (.halt yf)) : False := by
+  match args with
+  | [] => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
+      YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
+  | [_] => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
+      YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
+  | [_, _] => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
+      YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
+  | _ :: _ :: _ :: _ => exact absurd hb (by simp [YulSemantics.EVM.builtinWithExternal,
+      YulSemantics.EVM.stepOp, YulSemantics.EVM.bin])
+
 /-- Words subtract to zero exactly when they are equal (`U256` is a group). -/
 theorem u256_sub_eq_zero_iff {a b : U256} : a - b = 0 ↔ a = b := by
   constructor
@@ -339,6 +391,10 @@ theorem u256_sub_eq_zero_iff {a b : U256} : a - b = 0 ↔ a = b := by
     simpa using h'
   · rintro rfl
     simp
+
+/-- The zero test of a subtraction computes exactly the equality's `b2w`. -/
+theorem b2w_sub_eq {a b : U256} : b2w ((a - b : U256) = 0) = b2w (a = b) := by
+  simp only [b2w, u256_sub_eq_zero_iff]
 
 /-- `b2w_dbl_eq_zero_iff` for an arbitrary decidable proposition: the
 double-`b2w` truthiness collapse an eq-sub window rests on. -/
@@ -532,6 +588,10 @@ theorem step_sim [model : ExternalModel] {R : List Label} {prog prog' : List Asm
         -- both sides consume the operands: `eq` against `sub`
         obtain ⟨a, b, rfl, rfl, rfl⟩ := eq_inv hb
         exact ⟨_, .single sub_step, .es1 hc'⟩
+      | subIszeroEq hc' =>
+        -- the source subtracts; the optimized side waits with both operands
+        obtain ⟨a, b, rfl, rfl, rfl⟩ := sub_inv hb
+        exact ⟨_, .refl _, .si1 hc'⟩
       | gasFuse hc' =>
         -- window entry: the source reads its gas word, the optimized side
         -- stutters, remembering the oracle admission for the fused step
@@ -679,6 +739,16 @@ theorem step_sim [model : ExternalModel] {R : List Label} {prog prog' : List Asm
       have h0 : a - b = 0 :=
         u256_sub_eq_zero_iff.mpr (b2w_dbl_prop_eq_zero_iff.mp hv)
       exact ⟨_, .single (.jumpiFall h0), .sync hc⟩
+  | @si1 a b σ sc oc y hc =>
+    -- the source's `iszero`; the optimized side performs its `eq`
+    obtain ⟨args, rets, σ', yst', hσeq, hb, rfl⟩ := astep_op_inv hstep
+    obtain ⟨u, rfl, rfl, rfl⟩ := iszero_inv hb
+    obtain ⟨rfl, rfl⟩ : a - b = u ∧ σ = σ' := by
+      simpa [words] using hσeq
+    refine ⟨_, .single eq_step, ?_⟩
+    have hval : b2w ((a - b : U256) = 0) = b2w (a = b) := b2w_sub_eq
+    rw [hval]
+    exact .sync hc
   | @pd1 v σ sc oc y hc =>
     cases hstep with
     | push => exact ⟨_, .single (.dup (τ := []) rfl), .sync hc⟩
@@ -767,6 +837,7 @@ theorem halt_sim [model : ExternalModel] {R : List Label} {prog prog' : List Asm
       | keep _ hc' => exact .op hb
       | dblIszero _ => exact absurd hb iszero_no_halt
       | eqSubJumpi _ => exact absurd hb eq_no_halt
+      | subIszeroEq _ => exact absurd hb sub_no_halt
       | gasFuse _ => exact absurd hb gas_no_halt
     | @gasCall k g args c σ yst yst' hg hb =>
       cases hc with
@@ -789,6 +860,9 @@ theorem halt_sim [model : ExternalModel] {R : List Label} {prog prog' : List Asm
     obtain ⟨args, σ', -, hb⟩ := ahalt_op_inv hhalt
     exact absurd hb iszero_no_halt
   | es2 _ => exact absurd hhalt (by intro h; cases h)
+  | si1 hc =>
+    obtain ⟨args, σ', -, hb⟩ := ahalt_op_inv hhalt
+    exact absurd hb iszero_no_halt
   | pd1 _ => exact absurd hhalt (by intro h; cases h)
   | pj1 _ _ => exact absurd hhalt (by intro h; cases h)
   | pj0 _ => exact absurd hhalt (by intro h; cases h)
