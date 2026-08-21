@@ -136,6 +136,15 @@ theorem findLabel_latePush {l : Label} (v : U256) (n : Fin 16) (c : List Asm) :
     findLabel l (latePush v n ++ c) = findLabel l c := by
   unfold latePush; split <;> simp [findLabel]
 
+/-- Does a `latePush` or return-slot window open at the next instruction?
+The `push v; push v → push v; dup1` rewrite defers to those windows: firing
+across them would trade their eliminated instruction for an extra push and
+three gas. -/
+def deferPushWindow : List Asm → Bool
+  | .dup _ :: .swap m :: _ => m.val == 0
+  | .swap s :: .pop :: _ => s.val == 0
+  | _ => false
+
 /-- The Asm-level peephole scan, relative to the set `R` of labels that may
 be referenced. Rewrites every `push v ; dup n ; swap1` window to its
 `latePush`, every `swap1 ; op` window whose `op` has a reversed twin to that
@@ -160,6 +169,17 @@ def peepRun (R : List Label) : List Asm → List Asm
   | .push v :: .dup n :: .swap m :: rest =>
       if m.val = 0 then latePush v n ++ peepRun R rest
       else .push v :: peepRun R (.dup n :: .swap m :: rest)
+  | .push v :: .push w :: rest =>
+      -- re-materialized constant: duplicate instead (dup is one byte, the
+      -- repeated push is up to 33). PUSH0 pairs stay (DUP1 costs a gas
+      -- more), and the pair defers to a window opening at the second push.
+      if v = w ∧ v ≠ 0 ∧ deferPushWindow rest = false
+      then .push v :: .dup 0 :: peepRun R rest
+      else .push v :: peepRun R (.push w :: rest)
+  | .push c :: .jumpi l :: rest =>
+      -- constant branch condition: decide it now
+      if c = 0 then peepRun R rest
+      else .jump l :: peepRun R rest
   | .swap n :: .op yop :: rest =>
       match (if n.val = 0 then flipOp yop else none) with
       | some yop' => .op yop' :: peepRun R rest
@@ -209,6 +229,17 @@ def peepRunP (mem : Label → Bool) : List Asm → List Asm
   | .push v :: .dup n :: .swap m :: rest =>
       if m.val = 0 then latePush v n ++ peepRunP mem rest
       else .push v :: peepRunP mem (.dup n :: .swap m :: rest)
+  | .push v :: .push w :: rest =>
+      -- re-materialized constant: duplicate instead (dup is one byte, the
+      -- repeated push is up to 33). PUSH0 pairs stay (DUP1 costs a gas
+      -- more), and the pair defers to a window opening at the second push.
+      if v = w ∧ v ≠ 0 ∧ deferPushWindow rest = false
+      then .push v :: .dup 0 :: peepRunP mem rest
+      else .push v :: peepRunP mem (.push w :: rest)
+  | .push c :: .jumpi l :: rest =>
+      -- constant branch condition: decide it now
+      if c = 0 then peepRunP mem rest
+      else .jump l :: peepRunP mem rest
   | .swap n :: .op yop :: rest =>
       match (if n.val = 0 then flipOp yop else none) with
       | some yop' => .op yop' :: peepRunP mem rest
@@ -242,6 +273,9 @@ def peepRunP (mem : Label → Bool) : List Asm → List Asm
   | [] => []
   termination_by p => p.length
 
+set_option maxHeartbeats 1600000 in
+set_option linter.unreachableTactic false in
+set_option linter.unusedTactic false in
 /-- A membership test that agrees with `· ∈ R` gives exactly `peepRun R`. -/
 theorem peepRunP_eq_peepRun (mem : Label → Bool) (R : List Label)
     (h : ∀ l, mem l = decide (l ∈ R)) :
@@ -249,7 +283,13 @@ theorem peepRunP_eq_peepRun (mem : Label → Bool) (R : List Label)
   intro p
   -- `simp_all` uses `h` from the local context to line the dead-label test up
   -- with `· ∈ R` in the two `.label` cases.
-  fun_induction peepRunP mem p <;> rw [peepRun] <;> simp_all
+  fun_induction peepRunP mem p <;> rw [peepRun] <;>
+    first
+      | (simp_all; done)
+      | (rename_i h ih
+         first
+           | (obtain ⟨rfl, hv, hd⟩ := h; rw [if_pos ⟨rfl, hv, hd⟩, ih])
+           | rw [if_neg h, ih])
 
 /-- `peepRun` with the dead-label test backed by a hash set. -/
 def peepRunFast (R : List Label) (p : List Asm) : List Asm :=
@@ -332,6 +372,22 @@ inductive CodeRel (R : List Label) : List Asm → List Asm → Prop
       CodeRel R c c' →
       CodeRel R (.op .eq :: .op .iszero :: .jumpi l :: c)
                 (.op .sub :: .jumpi l :: c')
+  /-- Duplicate a re-materialized constant instead of pushing it again.
+  Sound for any value; the scan only rewrites nonzero constants (a `PUSH0`
+  costs less gas than the `DUP1`). -/
+  | pushDup {v : U256} {c c' : List Asm} :
+      CodeRel R c c' →
+      CodeRel R (.push v :: .push v :: c) (.push v :: .dup 0 :: c')
+  /-- Decide a constant nonzero branch condition: the jump is always taken. -/
+  | pushJumpiTaken {v : U256} (hv : v ≠ 0) {l : Label} {c c' : List Asm} :
+      CodeRel R c c' →
+      CodeRel R (.push v :: .jumpi l :: c) (.jump l :: c')
+  /-- Decide a constant zero branch condition: the branch never fires and
+  both instructions drop (the orphaned label reference feeds dead-label
+  elimination in a later round). -/
+  | pushJumpiFall {l : Label} {c c' : List Asm} :
+      CodeRel R c c' →
+      CodeRel R (.push 0 :: .jumpi l :: c) c'
   /-- Fuse a `gas()` read directly consumed as a call's gas argument into
   the fused instruction. The fused step's rule is exactly the composite of
   the two source steps, so the simulation reproduces whichever admitted
@@ -358,31 +414,37 @@ theorem codeRel_peepRun (R : List Label) (p : List Asm) : CodeRel R p (peepRun R
   | case1 v isLt rest ih => exact CodeRel.window (n := ⟨0, isLt⟩) rfl ih
   | case2 v n m rest hm ih => exact CodeRel.latePush hm ih
   | case3 v n m rest hm ih => exact CodeRel.keep _ ih
-  | case4 n yop rest yop' hf ih =>
+  | case4 v w rest h ih =>
+      obtain ⟨rfl, hv, -⟩ := h
+      exact CodeRel.pushDup ih
+  | case5 v w rest h ih => exact CodeRel.keep _ ih
+  | case6 l rest ih => exact CodeRel.pushJumpiFall ih
+  | case7 c l rest hc ih => exact CodeRel.pushJumpiTaken hc ih
+  | case8 n yop rest yop' hf ih =>
       have hn : n.val = 0 := by
         by_cases h : n.val = 0
         · exact h
         · simp [h] at hf
       exact CodeRel.flipCmp hn (by simpa [hn] using hf) ih
-  | case5 n yop rest hf ih => exact CodeRel.keep _ ih
-  | case6 l rest ih => exact CodeRel.dblIszero ih
-  | case7 m l' rest ih => exact CodeRel.keep _ ih
-  | case8 l m l' rest hne ih => exact CodeRel.eqSubJumpi ih
-  | case9 l rest hexcl ih => exact CodeRel.eqSubJumpi ih
-  | case10 yop rest k heq ih =>
+  | case9 n yop rest hf ih => exact CodeRel.keep _ ih
+  | case10 l rest ih => exact CodeRel.dblIszero ih
+  | case11 m l' rest ih => exact CodeRel.keep _ ih
+  | case12 l m l' rest hne ih => exact CodeRel.eqSubJumpi ih
+  | case13 l rest hexcl ih => exact CodeRel.eqSubJumpi ih
+  | case14 yop rest k heq ih =>
       obtain rfl := eq_op_of_gasCallKind? heq
       exact CodeRel.gasFuse ih
-  | case11 yop rest heq ih => exact CodeRel.keep _ ih
-  | case12 m l' rest ih => exact CodeRel.brInv ih
-  | case13 l m l' rest hne ih => exact CodeRel.keep _ ih
-  | case14 l' rest ih => exact CodeRel.jumpiNext ih
-  | case15 l l' rest hne ih => exact CodeRel.keep _ ih
-  | case16 l' rest ih => exact CodeRel.jumpNext ih
-  | case17 l l' rest hne ih => exact CodeRel.keep _ ih
-  | case18 l rest hmem ih => exact CodeRel.keep _ ih
-  | case19 l rest hmem ih => exact CodeRel.dropLabel hmem ih
-  | case20 i rest _ _ _ _ _ _ _ _ _ _ _ ih => exact CodeRel.keep i ih
-  | case21 => exact CodeRel.nil
+  | case15 yop rest heq ih => exact CodeRel.keep _ ih
+  | case16 m l' rest ih => exact CodeRel.brInv ih
+  | case17 l m l' rest hne ih => exact CodeRel.keep _ ih
+  | case18 l' rest ih => exact CodeRel.jumpiNext ih
+  | case19 l l' rest hne ih => exact CodeRel.keep _ ih
+  | case20 l' rest ih => exact CodeRel.jumpNext ih
+  | case21 l l' rest hne ih => exact CodeRel.keep _ ih
+  | case22 l rest hmem ih => exact CodeRel.keep _ ih
+  | case23 l rest hmem ih => exact CodeRel.dropLabel hmem ih
+  | case24 i rest _ _ _ _ _ _ _ _ _ _ _ _ _ ih => exact CodeRel.keep i ih
+  | case25 => exact CodeRel.nil
 
 /-- One `optimizeAsmRound` is `CodeRel`-related to its input, relative to the
 program's own reference set. -/
@@ -418,6 +480,15 @@ theorem codeRel_labelDefs_sublist {R : List Label} {P Q : List Asm}
       simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
         List.nil_append] using ih
   | eqSubJumpi _ ih =>
+      simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
+        List.nil_append] using ih
+  | pushDup _ ih =>
+      simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
+        List.nil_append] using ih
+  | pushJumpiTaken _ _ ih =>
+      simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
+        List.nil_append] using ih
+  | pushJumpiFall _ ih =>
       simpa only [labelDefs_cons, Asm.defines, Option.toList_none,
         List.nil_append] using ih
   | gasFuse _ ih =>
@@ -503,6 +574,25 @@ theorem codeRel_labelDefs_mem {R : List Label} {P Q : List Asm}
           · exact absurd h3 (by simp)
           · exact mem_labelDefs_cons.mpr (Or.inr
               (mem_labelDefs_cons.mpr (Or.inr (ih h3))))
+  | pushDup _ ih =>
+      rcases mem_labelDefs_cons.mp hl with h' | h'
+      · exact absurd h' (by simp)
+      · rcases mem_labelDefs_cons.mp h' with h'' | h''
+        · exact absurd h'' (by simp)
+        · exact mem_labelDefs_cons.mpr (Or.inr
+            (mem_labelDefs_cons.mpr (Or.inr (ih h''))))
+  | pushJumpiTaken _ _ ih =>
+      rcases mem_labelDefs_cons.mp hl with h' | h'
+      · exact absurd h' (by simp)
+      · rcases mem_labelDefs_cons.mp h' with h'' | h''
+        · exact absurd h'' (by simp)
+        · exact mem_labelDefs_cons.mpr (Or.inr (ih h''))
+  | pushJumpiFall _ ih =>
+      rcases mem_labelDefs_cons.mp hl with h' | h'
+      · exact absurd h' (by simp)
+      · rcases mem_labelDefs_cons.mp h' with h'' | h''
+        · exact absurd h'' (by simp)
+        · exact ih h''
   | jumpNext _ ih =>
       rcases mem_labelDefs_cons.mp hl with h' | h'
       · exact absurd h' (by simp)
@@ -590,6 +680,26 @@ theorem codeRel_labelRefs_subset {R : List Label} {P Q : List Asm}
             (mem_labelRefs_cons.mpr (Or.inl h'')))))
         · exact mem_labelRefs_cons.mpr (Or.inr (mem_labelRefs_cons.mpr (Or.inr
             (mem_labelRefs_cons.mpr (Or.inr (ih l' h''))))))
+  | pushDup _ ih =>
+      intro l' hl'
+      rcases mem_labelRefs_cons.mp hl' with h' | h'
+      · exact absurd h' (by simp [Asm.references])
+      · rcases mem_labelRefs_cons.mp h' with h'' | h''
+        · exact absurd h'' (by simp [Asm.references])
+        · exact mem_labelRefs_cons.mpr (Or.inr (mem_labelRefs_cons.mpr (Or.inr
+            (ih l' h''))))
+  | pushJumpiTaken _ _ ih =>
+      intro l' hl'
+      rcases mem_labelRefs_cons.mp hl' with h' | h'
+      · -- the `jump l` reference maps to the source `jumpi l`
+        exact mem_labelRefs_cons.mpr (Or.inr (mem_labelRefs_cons.mpr
+          (Or.inl (by simpa [Asm.references] using h'))))
+      · exact mem_labelRefs_cons.mpr (Or.inr (mem_labelRefs_cons.mpr (Or.inr
+          (ih l' h'))))
+  | pushJumpiFall _ ih =>
+      intro l' hl'
+      exact mem_labelRefs_cons.mpr (Or.inr (mem_labelRefs_cons.mpr (Or.inr
+        (ih l' hl'))))
   | jumpNext _ ih =>
       intro l' hl'
       rcases mem_labelRefs_cons.mp hl' with h' | h'
@@ -622,6 +732,9 @@ theorem codeRel_codeSize_le {R : List Label} {P Q : List Asm}
   | dblIszero _ ih => simp only [codeSize_cons, Asm.size]; omega
   | gasFuse _ ih => simp only [codeSize_cons, Asm.size]; omega
   | eqSubJumpi _ ih => simp only [codeSize_cons, Asm.size]; omega
+  | pushDup _ ih => simp only [codeSize_cons, Asm.size]; omega
+  | pushJumpiTaken _ _ ih => simp only [codeSize_cons, Asm.size]; omega
+  | pushJumpiFall _ ih => simp only [codeSize_cons, Asm.size]; omega
   | jumpNext _ ih => simp only [codeSize_cons, Asm.size]; omega
   | jumpiNext _ ih => simp only [codeSize_cons, Asm.size]; omega
   | dropLabel _ _ ih => simp only [codeSize_cons, Asm.size]; omega
@@ -695,6 +808,21 @@ theorem codeRel_findLabel {R : List Label} {P Q : List Asm} (h : CodeRel R P Q)
       obtain ⟨otgt, ho, hr⟩ := ih hf
       exact ⟨otgt, by rw [findLabel, if_neg (by simp), findLabel,
         if_neg (by simp)]; exact ho, hr⟩
+  | pushDup hc ih =>
+      intro tgt hf
+      rw [findLabel, if_neg (by simp), findLabel, if_neg (by simp)] at hf
+      obtain ⟨otgt, ho, hr⟩ := ih hf
+      exact ⟨otgt, by rw [findLabel, if_neg (by simp), findLabel,
+        if_neg (by simp)]; exact ho, hr⟩
+  | pushJumpiTaken _ hc ih =>
+      intro tgt hf
+      rw [findLabel, if_neg (by simp), findLabel, if_neg (by simp)] at hf
+      obtain ⟨otgt, ho, hr⟩ := ih hf
+      exact ⟨otgt, by rw [findLabel, if_neg (by simp)]; exact ho, hr⟩
+  | pushJumpiFall hc ih =>
+      intro tgt hf
+      rw [findLabel, if_neg (by simp), findLabel, if_neg (by simp)] at hf
+      exact ih hf
   | @jumpNext l0 c c' hc ih =>
       intro tgt hf
       rw [findLabel, if_neg (by simp), findLabel] at hf

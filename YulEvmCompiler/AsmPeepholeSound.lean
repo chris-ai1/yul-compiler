@@ -170,6 +170,23 @@ inductive Match [model : ExternalModel] (R : List Label) : AConf → AConf → P
       CodeRel R sc oc →
       Match R ⟨.jumpi l :: sc, .word (b2w (b2w (a = b) = 0)) :: σ, y⟩
               ⟨.jumpi l :: oc, .word (a - b) :: σ, y⟩
+  /-- Push-dup window: both sides have materialized the constant once; the
+  source re-pushes it, the optimized side duplicates it. -/
+  | pd1 {v : U256} {σ : List AVal} {sc oc : List Asm} {y : EvmState} :
+      CodeRel R sc oc →
+      Match R ⟨.push v :: sc, .word v :: σ, y⟩ ⟨.dup 0 :: oc, .word v :: σ, y⟩
+  /-- Constant-taken branch window: the source has pushed its nonzero
+  condition and is about to take the branch the optimized side jumps to
+  unconditionally. -/
+  | pj1 {v : U256} (hv : v ≠ 0) {l : Label} {σ : List AVal} {sc oc : List Asm}
+      {y : EvmState} :
+      CodeRel R sc oc →
+      Match R ⟨.jumpi l :: sc, .word v :: σ, y⟩ ⟨.jump l :: oc, σ, y⟩
+  /-- Constant-fall branch window: the source has pushed its zero condition;
+  the optimized side has already fallen through. -/
+  | pj0 {l : Label} {σ : List AVal} {sc oc : List Asm} {y : EvmState} :
+      CodeRel R sc oc →
+      Match R ⟨.jumpi l :: sc, .word 0 :: σ, y⟩ ⟨oc, σ, y⟩
   /-- Late constant push, deep `dup`: the source has pushed the literal and
   the optimized side has not started (it cannot `dup` yet — that the slot it
   reaches exists is exactly what the source's own `dup` is about to
@@ -495,6 +512,9 @@ theorem step_sim [model : ExternalModel] {R : List Label} {prog prog' : List Asm
       | keep _ hc' => exact ⟨_, .single .push, .sync hc'⟩
       | window hn hc' => exact ⟨_, .refl _, .mid1 hn hc'⟩
       | latePush hm hc' => exact latePush_entry hm hc'
+      | pushDup hc' => exact ⟨_, .single .push, .pd1 hc'⟩
+      | pushJumpiTaken hv hc' => exact ⟨_, .refl _, .pj1 hv hc'⟩
+      | pushJumpiFall hc' => exact ⟨_, .refl _, .pj0 hc'⟩
     | @pushImmutable key c σ2 yst =>
       -- No peephole window ever opens on an immutable placeholder, so the pass
       -- can only `keep` it — which is exactly what must happen: folding one
@@ -659,6 +679,20 @@ theorem step_sim [model : ExternalModel] {R : List Label} {prog prog' : List Asm
       have h0 : a - b = 0 :=
         u256_sub_eq_zero_iff.mpr (b2w_dbl_prop_eq_zero_iff.mp hv)
       exact ⟨_, .single (.jumpiFall h0), .sync hc⟩
+  | @pd1 v σ sc oc y hc =>
+    cases hstep with
+    | push => exact ⟨_, .single (.dup (τ := []) rfl), .sync hc⟩
+  | @pj1 v hv l σ sc oc y hc =>
+    cases hstep with
+    | @jumpiTaken _ _ c c'0 σ2 yst hv2 hf =>
+      have hR : l ∈ R := hRefs l (refs_of_suffix hsuf rfl)
+      obtain ⟨otgt, ho, hr⟩ := codeRel_findLabel hpp hR hf
+      exact ⟨_, .single (.jump ho), .sync hr⟩
+    | @jumpiFall _ _ c σ2 yst hv0 => exact absurd hv0 hv
+  | @pj0 l σ sc oc y hc =>
+    cases hstep with
+    | @jumpiTaken _ _ c c'0 σ2 yst hv hf => exact absurd rfl hv
+    | @jumpiFall _ _ c σ2 yst hv0 => exact ⟨_, .refl _, .sync hc⟩
   | @lp1 v n m hn hm S sc oc y hc =>
     obtain ⟨x, τ, ρ, hσeq, hτ, rfl⟩ := astep_dup_inv hstep
     cases τ with
@@ -755,6 +789,9 @@ theorem halt_sim [model : ExternalModel] {R : List Label} {prog prog' : List Asm
     obtain ⟨args, σ', -, hb⟩ := ahalt_op_inv hhalt
     exact absurd hb iszero_no_halt
   | es2 _ => exact absurd hhalt (by intro h; cases h)
+  | pd1 _ => exact absurd hhalt (by intro h; cases h)
+  | pj1 _ _ => exact absurd hhalt (by intro h; cases h)
+  | pj0 _ => exact absurd hhalt (by intro h; cases h)
   | @gasWin k g σ2 sc oc y hg hc =>
     obtain ⟨args, σ', hσeq, hb⟩ := ahalt_op_inv hhalt
     rcases args with _ | ⟨a, args'⟩
